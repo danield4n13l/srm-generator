@@ -10,7 +10,7 @@
 - [x] Implement output concatenation feature (option to merge all generated manifests into a single `manifest.json` file).
 
 ## Phase 2: Interactive CLI / TUI (Medium Priority)
-- [ ] Integrate an interactive prompt library.
+- [x] Integrate an interactive prompt library.
 - [ ] Implement an interactive mode that guides the user through parameter selection (input/output paths, template choices) if no CLI arguments are provided.
 - [ ] Add visual feedback (progress bars, success/error messages) for bulk processing.
 
