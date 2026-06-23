@@ -1,13 +1,13 @@
 # SRM Manifest Generator - TODO
 
 ## Phase 1: Core CLI Script (High Priority)
-- [ ] Choose programming language and set up project structure.
-- [ ] Implement argument parsing (input directory/files, output directory, template, single-file output flag, etc.).
-- [ ] Implement `.lnk` parsing logic to extract target path, launch arguments, and icon/working directory.
-- [ ] Implement JSON generation based on parsed `.lnk` data (mapping shortcut properties to manifest fields).
-- [ ] Implement templating support (use a default template if none provided, allow user to specify a custom template).
-- [ ] Implement output logic to write individual manifest JSON files to the output directory.
-- [ ] Implement output concatenation feature (option to merge all generated manifests into a single `manifest.json` file).
+- [x] Choose programming language and set up project structure.
+- [x] Implement argument parsing (input directory/files, output directory, template, single-file output flag, etc.).
+- [x] Implement `.lnk` parsing logic to extract target path, launch arguments, and icon/working directory.
+- [x] Implement JSON generation based on parsed `.lnk` data (mapping shortcut properties to manifest fields).
+- [x] Implement templating support (use a default template if none provided, allow user to specify a custom template).
+- [x] Implement output logic to write individual manifest JSON files to the output directory.
+- [x] Implement output concatenation feature (option to merge all generated manifests into a single `manifest.json` file).
 
 ## Phase 2: Interactive CLI / TUI (Medium Priority)
 - [ ] Integrate an interactive prompt library.
