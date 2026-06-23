@@ -18,8 +18,12 @@ param(
     [switch]$Force,
 
     [Alias('i')]
-    [Parameter(Mandatory = $false, HelpMessage = "Interactively modify properties for each read shortcut")]
-    [switch]$Interactive
+    [Parameter(Mandatory = $false, HelpMessage = "Interactively modify properties sequentially")]
+    [switch]$Interactive,
+
+    [Alias('t')]
+    [Parameter(Mandatory = $false, HelpMessage = "Launch a spreadsheet-like TUI editor after parsing")]
+    [switch]$TUI
 )
 
 # Basic validation for InputPath
@@ -124,6 +128,77 @@ foreach ($file in $files) {
     }
     
     $manifests += $manifest
+}
+
+if ($TUI) {
+    # Add '#' property for the TUI display
+    $rowIndex = 1
+    foreach ($m in $manifests) {
+        $m.Insert(0, "#", $rowIndex)
+        $rowIndex++
+    }
+
+    $esc = [char]27
+    Write-Host -NoNewline "$esc[?1049h" # Enter alternate screen buffer
+    
+    try {
+        while ($true) {
+            Write-Host -NoNewline "$esc[H$esc[2J" # Clear alternate buffer and home cursor
+            
+            # Display the parsed shortcuts in a table by converting hashtables to PSCustomObject
+            $manifests | ForEach-Object { [pscustomobject]$_ } | Format-Table -Property "#", title, target, startIn, launchOptions -AutoSize | Out-String | Write-Host
+        
+        $rowToEdit = Read-Host "Enter the row number to edit (or press Enter to finish)"
+        if ([string]::IsNullOrWhiteSpace($rowToEdit)) {
+            break
+        }
+        
+        if ($rowToEdit -match '^\d+$' -and $rowToEdit -ge 1 -and $rowToEdit -le $manifests.Count) {
+            $idx = [int]$rowToEdit - 1
+            $item = $manifests[$idx]
+            
+            Write-Host "---"
+            Write-Host "Editing Row: $($rowToEdit) - $($item.title)" -ForegroundColor Yellow
+            Write-Host "1. Title          [$($item.title)]"
+            Write-Host "2. Target         [$($item.target)]"
+            Write-Host "3. Start In       [$($item.startIn)]"
+            Write-Host "4. Launch Options [$($item.launchOptions)]"
+            
+            $propChoice = Read-Host "Which property to edit? (1-4, press Enter to cancel)"
+            
+            switch ($propChoice) {
+                '1' {
+                    $newVal = Read-Host "New Title"
+                    if (![string]::IsNullOrWhiteSpace($newVal)) { $item.title = $newVal }
+                }
+                '2' {
+                    $newVal = Read-Host "New Target"
+                    if (![string]::IsNullOrWhiteSpace($newVal)) { $item.target = $newVal }
+                }
+                '3' {
+                    $newVal = Read-Host "New Start In"
+                    if (![string]::IsNullOrWhiteSpace($newVal)) { $item.startIn = $newVal }
+                }
+                '4' {
+                    $newVal = Read-Host "New Launch Options"
+                    if ($newVal -ne "") { $item.launchOptions = $newVal }
+                }
+            }
+        }
+        else {
+            Write-Warning "Invalid row number."
+            Start-Sleep -Seconds 1
+        }
+    }
+    }
+    finally {
+        Write-Host -NoNewline "$esc[?1049l" # Exit alternate screen buffer
+    }
+
+    # Clean up '#' property
+    foreach ($m in $manifests) {
+        $m.Remove("#")
+    }
 }
 
 # Output as a single JSON array to the determined file path
