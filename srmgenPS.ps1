@@ -8,11 +8,21 @@ This script parses Windows shortcuts (.lnk) and generates JSON manifests for Ste
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
-    [Parameter(Mandatory = $true, HelpMessage = "Path to a directory containing .lnk files (or a single .lnk file, or .json for EditMode)")]
+    [Parameter(Mandatory = $false, Position = 0, HelpMessage = "Path to a directory containing .lnk files (or a single .lnk file, or .json for EditMode)")]
     [string]$InputPath,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Path to the output directory where the manifest will be saved")]
+    [Parameter(Mandatory = $false, Position = 1, HelpMessage = "Path to the output directory where the manifest will be saved")]
     [string]$OutputPath,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Custom output filename (overrides default <Drive>_<Folder>.manifest.json)")]
+    [string]$OutputFile,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Output mode: 'Merged' (single JSON manifest) or 'Individual' (separate file per game)")]
+    [ValidateSet('Merged', 'Individual')]
+    [string]$OutputMode = 'Merged',
+
+    [Parameter(Mandatory = $false, HelpMessage = "Manifest template to use: 'default', 'artwork', or path to a custom JSON template")]
+    [string]$Template = 'default',
 
     [Parameter(Mandatory = $false, HelpMessage = "Overwrite the output manifest if it already exists")]
     [switch]$Force,
@@ -42,6 +52,28 @@ if (Test-Path $moduleManifestPath) {
     Import-Module (Join-Path $PSScriptRoot "srmgen.psm1") -Force
 }
 
+# If no arguments provided, launch the interactive setup wizard
+if ([string]::IsNullOrWhiteSpace($InputPath)) {
+    if ([Environment]::UserInteractive) {
+        $wizard = Invoke-SrmWizard
+        if ($null -eq $wizard) {
+            Write-Warning "Setup wizard was cancelled."
+            return
+        }
+        $InputPath   = $wizard.InputPath
+        $OutputPath  = $wizard.OutputPath
+        $EditMode    = $wizard.EditMode
+        $OutputMode  = $wizard.OutputMode
+        $Template    = $wizard.Template
+        $TUI         = $wizard.TUI
+        $Interactive = $wizard.Interactive
+    }
+    else {
+        Write-Error "InputPath is required in non-interactive sessions."
+        return
+    }
+}
+
 # Basic validation for InputPath
 if (!(Test-Path $InputPath)) {
     Write-Error "InputPath does not exist: $InputPath"
@@ -53,8 +85,8 @@ $InputPath = (Resolve-Path $InputPath).Path
 
 # Handle OutputPath validation
 if (-not $EditMode -and [string]::IsNullOrWhiteSpace($OutputPath)) {
-    Write-Error "OutputPath is required when not in EditMode."
-    return
+    # Default OutputPath to InputPath directory if not specified
+    $OutputPath = if (Test-Path $InputPath -PathType Leaf) { Split-Path $InputPath } else { $InputPath }
 }
 
 if (![string]::IsNullOrWhiteSpace($OutputPath)) {
@@ -78,6 +110,9 @@ if ($Append -and $Force) {
     return
 }
 
+# Load the manifest template
+$templateObj = Get-SrmTemplate -Template $Template
+
 $manifests = @()
 $files = @()
 
@@ -100,9 +135,23 @@ if ($EditMode) {
     $manifests = Import-SrmManifest -Path $InputPath
 }
 else {
-    # Determine the default output file name based on InputPath's drive and folder name
-    $outFileName = Get-SrmDefaultManifestFileName -Path $InputPath
-    $outFilePath = Join-Path $OutputPath $outFileName
+    # Determine the destination path based on OutputMode and OutputFile
+    if ($OutputMode -eq 'Individual') {
+        $outFilePath = $OutputPath
+    }
+    else {
+        if (![string]::IsNullOrWhiteSpace($OutputFile)) {
+            if ([System.IO.Path]::IsPathRooted($OutputFile)) {
+                $outFilePath = $OutputFile
+            } else {
+                $outFilePath = Join-Path $OutputPath $OutputFile
+            }
+        }
+        else {
+            $outFileName = Get-SrmDefaultManifestFileName -Path $InputPath
+            $outFilePath = Join-Path $OutputPath $outFileName
+        }
+    }
 
     # Collect target .lnk files
     if (Test-Path $InputPath -PathType Leaf) {
@@ -124,8 +173,8 @@ else {
     }
 }
 
-# Check if output exists and prompt if needed
-$outputExists = Test-Path $outFilePath -PathType Leaf
+# For Merged mode, check if output exists and prompt if needed
+$outputExists = ($OutputMode -eq 'Merged') -and (Test-Path $outFilePath -PathType Leaf)
 if ($outputExists -and -not $Append -and -not $Force) {
     if ($WhatIfPreference) {
         Write-Warning "Output file exists. Specify -Append or -Force with -WhatIf to preview the intended action."
@@ -168,7 +217,16 @@ if ($Append -and $outputExists) {
 
 # Process .lnk files if not in Edit mode
 if (-not $EditMode) {
+    $totalFiles = $files.Count
+    $currentIndex = 0
+
     foreach ($file in $files) {
+        $currentIndex++
+        $pct = [int](($currentIndex / $totalFiles) * 100)
+        try {
+            Write-Progress -Activity "Generating Steam ROM Manager Manifests" -Status "Processing: $($file.Name)" -PercentComplete $pct
+        } catch {}
+
         Write-Host "Parsing: $($file.Name)"
         $shortcutInfo = ConvertFrom-LnkShortcut -Path $file.FullName
         if ($null -eq $shortcutInfo) { continue }
@@ -192,10 +250,15 @@ if (-not $EditMode) {
             -Target $parsedTarget `
             -StartIn $parsedStartIn `
             -LaunchOptions $parsedLaunchOptions `
-            -AppendArgsToExecutable $false
+            -AppendArgsToExecutable $false `
+            -Template $templateObj
 
         $manifests += $manifest
     }
+
+    try {
+        Write-Progress -Activity "Generating Steam ROM Manager Manifests" -Completed
+    } catch {}
 }
 
 # Sequential interactive modification
@@ -208,8 +271,13 @@ if ($TUI) {
     $manifests = Invoke-SrmTui -Manifests $manifests
 }
 
-# Export manifest
-Export-SrmManifest -Manifests $manifests -Path $outFilePath -Append:$Append -Force:$Force
+# Export manifest(s)
+Export-SrmManifest `
+    -Manifests $manifests `
+    -Path $outFilePath `
+    -OutputMode $OutputMode `
+    -Append:$Append `
+    -Force:$Force
 
 if (-not $EditMode) {
     Write-Host "Done! Processed $($files.Count) shortcut(s)."

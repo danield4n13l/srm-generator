@@ -7,16 +7,16 @@
 - [x] Implement argument parsing (input directory/files, output directory, single-file output flag, etc.).
 - [x] Implement `.lnk` parsing logic to extract target path, launch arguments, and icon/working directory.
 - [x] Implement JSON generation based on parsed `.lnk` data (mapping shortcut properties to manifest fields).
-- [ ] Implement advanced templating support (custom template files, token expansion, cover/artwork fields).
-- [ ] Implement output granularity options (individual manifest JSON files per game vs. merged `manifest.json`).
+- [x] Implement advanced templating support (custom template files, token expansion, cover/artwork fields).
+- [x] Implement output granularity options (individual manifest JSON files per game vs. merged `manifest.json`).
 - [x] Implement output concatenation & deduplication feature (merge shortcuts into a single manifest, skipping duplicate targets).
 - [x] Write project documentation (`README.md`).
 
 ## Phase 2: Interactive CLI / TUI (Medium Priority)
 - [x] Integrate console TUI editor (`-TUI`) using alternate screen buffer.
 - [x] Implement sequential interactive property editor (`-Interactive`).
-- [ ] Implement an interactive setup wizard that guides the user through parameter selection if no CLI arguments are provided.
-- [ ] Add visual feedback (progress bars via `Write-Progress`) for bulk processing.
+- [x] Implement an interactive setup wizard that guides the user through parameter selection if no CLI arguments are provided.
+- [x] Add visual feedback (progress bars via `Write-Progress`) for bulk processing.
 
 ## Phase 3: GUI Wrapper (Low Priority / Optional)
 - [ ] Choose a lightweight GUI framework (WPF/XAML recommended for Windows).

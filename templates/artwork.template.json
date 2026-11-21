@@ -1,0 +1,12 @@
+{
+  "title": "{{title}}",
+  "target": "{{target}}",
+  "startIn": "{{startIn}}",
+  "launchOptions": "{{launchOptions}}",
+  "appendArgsToExecutable": false,
+  "cover": "",
+  "icon": "",
+  "hero": "",
+  "logo": "",
+  "banner": ""
+}

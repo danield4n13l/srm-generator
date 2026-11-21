@@ -4,7 +4,7 @@
 
 @{
     RootModule = 'srmgen.psm1'
-    ModuleVersion = '1.0.0'
+    ModuleVersion = '1.1.0'
     GUID = '9e0b8e64-f6cf-4482-a9b0-94d76295de32'
     Author = 'Steam ROM Manager Manifest Generator'
     CompanyName = 'Community'
@@ -14,13 +14,15 @@
     FunctionsToExport = @(
         'Get-SrmTargetKey',
         'Get-SrmDefaultManifestFileName',
+        'Get-SrmTemplate',
         'ConvertFrom-LnkShortcut',
         'New-SrmManifestEntry',
         'Import-SrmManifest',
         'Export-SrmManifest',
         'Read-SrmHostPrefilled',
         'Invoke-SrmInteractivePrompt',
-        'Invoke-SrmTui'
+        'Invoke-SrmTui',
+        'Invoke-SrmWizard'
     )
     CmdletsToExport = @()
     VariablesToExport = @()

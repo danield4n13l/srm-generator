@@ -36,7 +36,6 @@ function Get-SrmDefaultManifestFileName {
     if (![string]::IsNullOrWhiteSpace($qualifier)) {
         $drive = $qualifier.Replace(':', '').Replace('\', '')
     } else {
-        # Fallback for UNC or non-drive paths
         $drive = "UNC"
     }
 
@@ -46,6 +45,82 @@ function Get-SrmDefaultManifestFileName {
     }
 
     return "${drive}_${folderName}.manifest.json"
+}
+
+function Get-SrmTemplate {
+    <#
+    .SYNOPSIS
+    Loads a manifest template definition from a preset name or JSON file path.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$Template = 'default'
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Template) -or $Template -eq 'default') {
+        return [ordered]@{
+            title                  = '{{title}}'
+            target                 = '{{target}}'
+            startIn                = '{{startIn}}'
+            launchOptions          = '{{launchOptions}}'
+            appendArgsToExecutable = $false
+        }
+    }
+
+    if ($Template -eq 'artwork') {
+        $builtInArtwork = Join-Path $PSScriptRoot "templates\artwork.template.json"
+        if (Test-Path $builtInArtwork) {
+            $parsed = Get-Content $builtInArtwork -Raw | ConvertFrom-Json
+            $order = [ordered]@{}
+            foreach ($p in $parsed.PSObject.Properties) { $order[$p.Name] = $p.Value }
+            return $order
+        }
+        return [ordered]@{
+            title                  = '{{title}}'
+            target                 = '{{target}}'
+            startIn                = '{{startIn}}'
+            launchOptions          = '{{launchOptions}}'
+            appendArgsToExecutable = $false
+            cover                  = ''
+            icon                   = ''
+            hero                   = ''
+            logo                   = ''
+            banner                 = ''
+        }
+    }
+
+    if (Test-Path $Template -PathType Leaf) {
+        $parsed = Get-Content -Path $Template -Raw | ConvertFrom-Json
+        $order = [ordered]@{}
+        foreach ($p in $parsed.PSObject.Properties) { $order[$p.Name] = $p.Value }
+        return $order
+    }
+
+    $templateInDir = Join-Path $PSScriptRoot "templates\$Template"
+    if (Test-Path $templateInDir -PathType Leaf) {
+        $parsed = Get-Content -Path $templateInDir -Raw | ConvertFrom-Json
+        $order = [ordered]@{}
+        foreach ($p in $parsed.PSObject.Properties) { $order[$p.Name] = $p.Value }
+        return $order
+    }
+
+    $templateWithExt = Join-Path $PSScriptRoot "templates\$Template.template.json"
+    if (Test-Path $templateWithExt -PathType Leaf) {
+        $parsed = Get-Content -Path $templateWithExt -Raw | ConvertFrom-Json
+        $order = [ordered]@{}
+        foreach ($p in $parsed.PSObject.Properties) { $order[$p.Name] = $p.Value }
+        return $order
+    }
+
+    Write-Warning "Template '$Template' not found. Using default template."
+    return [ordered]@{
+        title                  = '{{title}}'
+        target                 = '{{target}}'
+        startIn                = '{{startIn}}'
+        launchOptions          = '{{launchOptions}}'
+        appendArgsToExecutable = $false
+    }
 }
 
 function ConvertFrom-LnkShortcut {
@@ -76,7 +151,6 @@ function ConvertFrom-LnkShortcut {
         try {
             $shortcut = $WshShell.CreateShortcut($item.FullName)
 
-            # Clean title: strip trailing ' - Shortcut' or ' Shortcut' and file extension
             $cleanTitle = $item.BaseName -replace '\s*-?\s*Shortcut\s*$', ''
             $cleanTitle = $cleanTitle -replace '\.[^.]+$', ''
 
@@ -97,7 +171,7 @@ function ConvertFrom-LnkShortcut {
 function New-SrmManifestEntry {
     <#
     .SYNOPSIS
-    Creates an ordered hashtable representing an entry in a Steam ROM Manager manifest.
+    Creates an ordered hashtable representing an entry in a Steam ROM Manager manifest, optionally applying a template.
     #>
     [CmdletBinding()]
     param(
@@ -114,16 +188,51 @@ function New-SrmManifestEntry {
         [string]$LaunchOptions = '',
 
         [Parameter(Mandatory = $false)]
-        [bool]$AppendArgsToExecutable = $false
+        [bool]$AppendArgsToExecutable = $false,
+
+        [Parameter(Mandatory = $false)]
+        [object]$Template
     )
 
-    return [ordered]@{
-        title                  = $Title
-        target                 = $Target
-        startIn                = $StartIn
-        launchOptions          = $LaunchOptions
-        appendArgsToExecutable = $AppendArgsToExecutable
+    if ($null -eq $Template) {
+        return [ordered]@{
+            title                  = $Title
+            target                 = $Target
+            startIn                = $StartIn
+            launchOptions          = $LaunchOptions
+            appendArgsToExecutable = $AppendArgsToExecutable
+        }
     }
+
+    $entry = [ordered]@{}
+    $props = if ($Template -is [System.Management.Automation.PSCustomObject]) {
+        $Template.PSObject.Properties
+    } else {
+        $Template.GetEnumerator()
+    }
+
+    foreach ($prop in $props) {
+        $val = $prop.Value
+        if ($val -is [string]) {
+            $replaced = $val
+            $replaced = $replaced -replace '\{\{\s*title\s*\}\}|\$\{title\}', $Title
+            $replaced = $replaced -replace '\{\{\s*target\s*\}\}|\$\{target\}', $Target
+            $replaced = $replaced -replace '\{\{\s*startIn\s*\}\}|\$\{startIn\}', $StartIn
+            $replaced = $replaced -replace '\{\{\s*launchOptions\s*\}\}|\$\{launchOptions\}', $LaunchOptions
+            $entry[$prop.Name] = $replaced
+        } else {
+            $entry[$prop.Name] = $val
+        }
+    }
+
+    # Ensure essential SRM keys exist
+    if (-not $entry.Contains('title')) { $entry['title'] = $Title }
+    if (-not $entry.Contains('target')) { $entry['target'] = $Target }
+    if (-not $entry.Contains('startIn')) { $entry['startIn'] = $StartIn }
+    if (-not $entry.Contains('launchOptions')) { $entry['launchOptions'] = $LaunchOptions }
+    if (-not $entry.Contains('appendArgsToExecutable')) { $entry['appendArgsToExecutable'] = $AppendArgsToExecutable }
+
+    return $entry
 }
 
 function Import-SrmManifest {
@@ -164,7 +273,7 @@ function Import-SrmManifest {
 function Export-SrmManifest {
     <#
     .SYNOPSIS
-    Saves an array of manifest entries as a formatted JSON manifest file, supporting append and deduplication.
+    Saves an array of manifest entries as formatted JSON manifest file(s), supporting append, deduplication, and individual file output.
     #>
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
@@ -173,6 +282,10 @@ function Export-SrmManifest {
 
         [Parameter(Mandatory = $true)]
         [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Merged', 'Individual')]
+        [string]$OutputMode = 'Merged',
 
         [Parameter(Mandatory = $false)]
         [switch]$Append,
@@ -189,6 +302,44 @@ function Export-SrmManifest {
         return
     }
 
+    if ($OutputMode -eq 'Individual') {
+        # Ensure output directory exists
+        if (!(Test-Path $Path)) {
+            if ($PSCmdlet.ShouldProcess($Path, "Create output directory")) {
+                New-Item -ItemType Directory -Force -Path $Path | Out-Null
+            }
+        }
+
+        $writtenFiles = @()
+        foreach ($entry in $Manifests) {
+            $cleanTitle = ([string]$entry.title).Trim()
+            $safeTitle = ($cleanTitle -replace '[\\/:*?"<>|]', '_').Trim()
+            if ([string]::IsNullOrWhiteSpace($safeTitle)) {
+                $safeTitle = "Game_$([System.Guid]::NewGuid().ToString('N').Substring(0, 8))"
+            }
+
+            $individualFilePath = Join-Path $Path "$safeTitle.manifest.json"
+            $individualExists = Test-Path $individualFilePath -PathType Leaf
+
+            if ($individualExists -and -not $Force -and -not $Append) {
+                Write-Warning "File already exists, skipping: $individualFilePath (use -Force to overwrite)"
+                continue
+            }
+
+            if ($PSCmdlet.ShouldProcess($individualFilePath, "Write individual manifest")) {
+                ConvertTo-Json -InputObject $entry -Depth 10 | Set-Content -Path $individualFilePath -Encoding UTF8
+                Write-Host "-> Generated individual manifest: $individualFilePath"
+                $writtenFiles += $individualFilePath
+            }
+        }
+
+        if ($PassThru) {
+            return ,$writtenFiles
+        }
+        return
+    }
+
+    # Merged output mode
     $outputExists = Test-Path $Path -PathType Leaf
     $finalEntries = @()
     $existingTargets = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -212,7 +363,6 @@ function Export-SrmManifest {
         }
     }
     else {
-        # Deduplicate incoming entries among themselves if any duplicate targets exist
         $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($entry in $Manifests) {
             $key = Get-SrmTargetKey $entry
@@ -229,7 +379,6 @@ function Export-SrmManifest {
 
     $actionDesc = if ($Append -and $outputExists) { "Append manifest entries" } else { "Write manifest" }
     if ($PSCmdlet.ShouldProcess($Path, $actionDesc)) {
-        # Ensure parent directory exists
         $parentDir = Split-Path $Path -Parent
         if (![string]::IsNullOrWhiteSpace($parentDir) -and !(Test-Path $parentDir)) {
             New-Item -ItemType Directory -Force -Path $parentDir | Out-Null
@@ -314,7 +463,6 @@ function Invoke-SrmTui {
         [array]$Manifests
     )
 
-    # Attach temporary row index
     $rowIndex = 1
     foreach ($m in $Manifests) {
         $m.Insert(0, "#", $rowIndex)
@@ -322,13 +470,12 @@ function Invoke-SrmTui {
     }
 
     $esc = [char]27
-    Write-Host -NoNewline "$esc[?1049h" # Enter alternate screen buffer
+    Write-Host -NoNewline "$esc[?1049h"
 
     try {
         while ($true) {
-            Write-Host -NoNewline "$esc[H$esc[2J" # Clear buffer and home cursor
+            Write-Host -NoNewline "$esc[H$esc[2J"
 
-            # Display table
             $Manifests | ForEach-Object { [pscustomobject]$_ } | Format-Table -Property "#", title, target, startIn, launchOptions -AutoSize | Out-String | Write-Host
 
             $rowToEdit = Read-Host "Enter the row number to edit (or press Enter to finish)"
@@ -382,10 +529,9 @@ function Invoke-SrmTui {
         }
     }
     finally {
-        Write-Host -NoNewline "$esc[?1049l" # Restore main screen buffer
+        Write-Host -NoNewline "$esc[?1049l"
     }
 
-    # Clean up temporary row index
     foreach ($m in $Manifests) {
         $m.Remove("#")
     }
@@ -393,14 +539,129 @@ function Invoke-SrmTui {
     return ,$Manifests
 }
 
+function Invoke-SrmWizard {
+    <#
+    .SYNOPSIS
+    Runs an interactive guided setup wizard to collect arguments when none are provided.
+    #>
+    [CmdletBinding()]
+    param()
+
+    Write-Host ""
+    Write-Host "==========================================================" -ForegroundColor Cyan
+    Write-Host "     Steam ROM Manager - Manifest Generator Wizard       " -ForegroundColor Cyan
+    Write-Host "==========================================================" -ForegroundColor Cyan
+    Write-Host "No arguments provided. Guided setup will assist you." -ForegroundColor Gray
+    Write-Host ""
+
+    Write-Host "Select Operation Mode:" -ForegroundColor Yellow
+    Write-Host "  [1] Generate manifest from Windows shortcuts (.lnk)"
+    Write-Host "  [2] Edit an existing manifest file (.json)"
+    $modeChoice = ""
+    do {
+        $modeChoice = (Read-Host "Choice [1/2, default: 1]").Trim()
+        if ([string]::IsNullOrWhiteSpace($modeChoice)) { $modeChoice = "1" }
+    } while ($modeChoice -notin @("1", "2"))
+
+    if ($modeChoice -eq "2") {
+        Write-Host "`n-- Edit Mode --" -ForegroundColor Yellow
+        $jsonPath = ""
+        do {
+            $jsonPath = (Read-Host "Path to existing manifest (.json)").Trim().Trim('"').Trim("'")
+            if (!(Test-Path $jsonPath -PathType Leaf) -or $jsonPath -notmatch '\.json$') {
+                Write-Warning "File does not exist or is not a .json file. Please try again."
+                $jsonPath = ""
+            }
+        } while ([string]::IsNullOrWhiteSpace($jsonPath))
+
+        Write-Host "`nChoose an editor:" -ForegroundColor Yellow
+        Write-Host "  [1] Spreadsheet-like TUI editor (recommended)"
+        Write-Host "  [2] Sequential terminal prompts"
+        Write-Host "  [3] None (copy/validate only)"
+        $editChoice = (Read-Host "Choice [1/2/3, default: 1]").Trim()
+        if ([string]::IsNullOrWhiteSpace($editChoice)) { $editChoice = "1" }
+
+        $tui = ($editChoice -eq "1")
+        $interactive = ($editChoice -eq "2")
+
+        $outPath = (Read-Host "Output directory (press Enter to overwrite original file in place)").Trim().Trim('"').Trim("'")
+
+        return @{
+            InputPath   = $jsonPath
+            OutputPath  = $outPath
+            EditMode    = $true
+            TUI         = $tui
+            Interactive = $interactive
+            OutputMode  = 'Merged'
+            Template    = 'default'
+        }
+    }
+
+    Write-Host "`n-- Shortcut Parsing Mode --" -ForegroundColor Yellow
+    $inPath = ""
+    do {
+        $inPath = (Read-Host "Path to folder with .lnk shortcuts (or a single .lnk)").Trim().Trim('"').Trim("'")
+        if (!(Test-Path $inPath)) {
+            Write-Warning "Path '$inPath' does not exist. Please enter a valid path."
+            $inPath = ""
+        }
+    } while ([string]::IsNullOrWhiteSpace($inPath))
+
+    $defaultOut = if (Test-Path $inPath -PathType Leaf) { Split-Path $inPath } else { $inPath }
+    $outDir = (Read-Host "Output directory [default: $defaultOut]").Trim().Trim('"').Trim("'")
+    if ([string]::IsNullOrWhiteSpace($outDir)) { $outDir = $defaultOut }
+
+    Write-Host "`nOutput Mode:" -ForegroundColor Yellow
+    Write-Host "  [1] Single merged manifest file (recommended for SRM Manual parser)"
+    Write-Host "  [2] Individual manifest files per game"
+    $outModeChoice = (Read-Host "Choice [1/2, default: 1]").Trim()
+    $outMode = if ($outModeChoice -eq "2") { 'Individual' } else { 'Merged' }
+
+    Write-Host "`nManifest Template:" -ForegroundColor Yellow
+    Write-Host "  [1] Standard SRM (title, target, startIn, launchOptions)"
+    Write-Host "  [2] SRM with Artwork fields (adds cover, icon, hero, logo, banner)"
+    Write-Host "  [3] Custom template file (.json)"
+    $templateChoice = (Read-Host "Choice [1/2/3, default: 1]").Trim()
+    $template = 'default'
+    if ($templateChoice -eq "2") {
+        $template = 'artwork'
+    } elseif ($templateChoice -eq "3") {
+        $customTpl = (Read-Host "Path to custom JSON template").Trim().Trim('"').Trim("'")
+        if (Test-Path $customTpl) { $template = $customTpl } else { Write-Warning "File not found; using default." }
+    }
+
+    Write-Host "`nReview / Editing:" -ForegroundColor Yellow
+    Write-Host "  [1] Save directly (batch mode)"
+    Write-Host "  [2] Launch spreadsheet-like TUI editor before saving"
+    Write-Host "  [3] Interactively edit each shortcut sequentially"
+    $revChoice = (Read-Host "Choice [1/2/3, default: 1]").Trim()
+    $tui = ($revChoice -eq "2")
+    $interactive = ($revChoice -eq "3")
+
+    Write-Host ""
+    Write-Host "Starting generation..." -ForegroundColor Green
+
+    return @{
+        InputPath   = $inPath
+        OutputPath  = $outDir
+        EditMode    = $false
+        OutputMode  = $outMode
+        Template    = $template
+        TUI         = $tui
+        Interactive = $interactive
+    }
+}
+
 Export-ModuleMember -Function @(
     'Get-SrmTargetKey',
     'Get-SrmDefaultManifestFileName',
+    'Get-SrmTemplate',
     'ConvertFrom-LnkShortcut',
     'New-SrmManifestEntry',
     'Import-SrmManifest',
     'Export-SrmManifest',
     'Read-SrmHostPrefilled',
     'Invoke-SrmInteractivePrompt',
-    'Invoke-SrmTui'
+    'Invoke-SrmTui',
+    'Invoke-SrmWizard'
 )
