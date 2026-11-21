@@ -33,7 +33,7 @@ srm-generator/
 ├── srmgen.psd1             # Module manifest (metadata, exported cmdlets)
 ├── srmgen.psm1             # Core logic engine (LNK parsing, JSON export, TUI, wizard)
 ├── srmgenPS.ps1            # CLI runner with full argument validation and wizard
-├── srmgenPSgui.ps1         # Planned GUI interface (Phase 3)
+├── srmgenPSgui.ps1         # Native WPF/XAML graphical user interface
 ├── TODO.md                 # Project roadmap and milestone tracker
 ├── templates/              # Built-in and custom manifest templates
 │   ├── default.template.json
@@ -60,12 +60,18 @@ srm-generator/
    cd srm-generator
    ```
 
-2. **Interactive Wizard Mode** (no arguments needed):
+2. **Graphical User Interface (GUI)**:
+   Launch the native desktop interface with folder pickers and interactive data grid:
+   ```powershell
+   .\srmgenPSgui.ps1
+   ```
+
+3. **Interactive CLI Wizard** (no arguments needed):
    ```powershell
    .\srmgenPS.ps1
    ```
 
-3. **Or generate directly via CLI**:
+4. **Direct CLI Generation**:
    ```powershell
    .\srmgenPS.ps1 -InputPath "C:\Games\Shortcuts" -OutputPath "C:\SRM\Manifests"
    ```

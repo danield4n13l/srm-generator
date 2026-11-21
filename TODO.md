@@ -19,6 +19,6 @@
 - [x] Add visual feedback (progress bars via `Write-Progress`) for bulk processing.
 
 ## Phase 3: GUI Wrapper (Low Priority / Optional)
-- [ ] Choose a lightweight GUI framework (WPF/XAML recommended for Windows).
-- [ ] Build a simple form-based UI in `srmgenPSgui.ps1` to select input/output folders and configure templates visually.
-- [ ] Connect the GUI inputs to execute the core `srmgen` module cmdlets.
+- [x] Choose a lightweight GUI framework (WPF/XAML with modern dark styling).
+- [x] Build an interactive form-based UI in `srmgenPSgui.ps1` with folder pickers, template selection, and an editable preview table.
+- [x] Connect the GUI inputs to execute the core `srmgen` module cmdlets with live DataGrid editing and File Explorer integration.
