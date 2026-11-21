@@ -6,7 +6,7 @@ srmgenPS.ps1 is a PowerShell script that imports and generates external shortcut
 .DESCRIPTION
 This script parses Windows shortcuts (.lnk) and generates JSON manifests for Steam ROM Manager.
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
     [Parameter(Mandatory = $true, HelpMessage = "Path to a directory containing .lnk files (or a single .lnk file, or .json for EditMode)")]
     [string]$InputPath,
@@ -16,6 +16,10 @@ param(
 
     [Parameter(Mandatory = $false, HelpMessage = "Overwrite the output manifest if it already exists")]
     [switch]$Force,
+
+    [Alias('a')]
+    [Parameter(Mandatory = $false, HelpMessage = "Append entries to the existing output manifest")]
+    [switch]$Append,
 
     [Alias('i')]
     [Parameter(Mandatory = $false, HelpMessage = "Interactively modify properties sequentially")]
@@ -47,7 +51,9 @@ if (-not $EditMode -and [string]::IsNullOrWhiteSpace($OutputPath)) {
 
 if (![string]::IsNullOrWhiteSpace($OutputPath)) {
     if (!(Test-Path $OutputPath)) {
-        New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
+        if ($PSCmdlet.ShouldProcess($OutputPath, "Create output directory")) {
+            New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
+        }
     }
     else {
         $OutputPath = (Resolve-Path $OutputPath).Path
@@ -70,15 +76,24 @@ function Read-HostPrefilled {
             } catch {}
         }
         
-        $res = Read-Host "$Prompt (Up Arrow to edit, type Space to clear)"
+        $res = Read-Host "$Prompt (Up to edit, Space to clear)"
         
         # If user just presses Enter, keep the original. 
         # If they want to clear it, they type a single space.
+        Clear-History -Count 1 -CommandLine "$DefaultValue" -ErrorAction SilentlyContinue
         if ($res -eq "") { return $DefaultValue }
         if ($res -eq " ") { return "" }
         return $res
     }
     return Read-Host $Prompt
+}
+
+function Get-TargetKey {
+    param([object]$Manifest)
+
+    $target = [string]$Manifest.target
+    if ([string]::IsNullOrWhiteSpace($target)) { return $null }
+    return $target.Trim()
 }
 
 $manifests = @()
@@ -137,10 +152,51 @@ else {
     }
 }
 
-# Check if output file exists to prevent accidental overwrite
-if ((Test-Path $outFilePath) -and -not $Force -and ($outFilePath -ne $InputPath)) {
-    Write-Error "Output file already exists: $outFilePath. Use -Force to overwrite."
+# Resolve the action for an existing output before doing any shortcut parsing.
+if ($Append -and $Force) {
+    Write-Error "-Append and -Force cannot be used together."
     exit 1
+}
+
+$outputExists = Test-Path $outFilePath -PathType Leaf
+if ($outputExists -and -not $Append -and -not $Force) {
+    if ($WhatIfPreference) {
+        Write-Warning "Output file exists. Specify -Append or -Force with -WhatIf to preview the intended action."
+        exit 0
+    }
+
+    do {
+        $outputChoice = (Read-Host "Output file exists. [A]ppend, [O]verwrite, or [C]ancel?").Trim().ToUpperInvariant()
+        switch ($outputChoice) {
+            { $_ -in @('A', 'APPEND') } { $Append = $true }
+            { $_ -in @('O', 'OVERWRITE') } { $Force = $true }
+            { $_ -in @('C', 'CANCEL', '') } { exit 0 }
+            default { Write-Warning "Choose A to append, O to overwrite, or C to cancel." }
+        }
+    } while (-not $Append -and -not $Force)
+}
+
+$existingManifests = @()
+$existingTargets = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$seenInputTargets = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+if ($Append -and $outputExists) {
+    $existingManifests = @(Get-Content -Path $outFilePath -Raw | ConvertFrom-Json)
+    foreach ($existingManifest in $existingManifests) {
+        $targetKey = Get-TargetKey $existingManifest
+        if ($null -ne $targetKey) { [void]$existingTargets.Add($targetKey) }
+    }
+
+    if ($EditMode) {
+        $manifests = @($manifests | Where-Object {
+            $targetKey = Get-TargetKey $_
+            if ($null -eq $targetKey) { return $true }
+            if ($existingTargets.Contains($targetKey) -or -not $seenInputTargets.Add($targetKey)) {
+                Write-Host "Skipping existing target: $targetKey"
+                return $false
+            }
+            return $true
+        })
+    }
 }
 
 # Process .lnk files if not in Edit mode
@@ -160,6 +216,15 @@ if (-not $EditMode) {
         $parsedTarget = $shortcut.TargetPath
         $parsedStartIn = $shortcut.WorkingDirectory
         $parsedLaunchOptions = $shortcut.Arguments
+
+        if ($Append -and $outputExists) {
+            $targetKey = ([string]$parsedTarget).Trim()
+            if (![string]::IsNullOrWhiteSpace($targetKey) -and
+                ($existingTargets.Contains($targetKey) -or -not $seenInputTargets.Add($targetKey))) {
+                Write-Host "Skipping existing target: $targetKey"
+                continue
+            }
+        }
 
         # Interactive sequential prompts
         if ($Interactive) {
@@ -291,8 +356,25 @@ if ($TUI) {
 }
 
 # Output as a single JSON array to the determined file path
-$manifests | ConvertTo-Json -Depth 10 | Set-Content -Path $outFilePath
-Write-Host "-> Generated single manifest: $outFilePath"
+$outputManifests = @($manifests)
+if ($Append -and $outputExists) {
+    $outputManifests = @($existingManifests)
+    foreach ($manifest in $manifests) {
+        $targetKey = Get-TargetKey $manifest
+        if ($null -ne $targetKey -and $existingTargets.Contains($targetKey)) {
+            Write-Host "Skipping target already present in output: $targetKey"
+            continue
+        }
+        if ($null -ne $targetKey) { [void]$existingTargets.Add($targetKey) }
+        $outputManifests += $manifest
+    }
+}
+
+$writeAction = if ($Append -and $outputExists) { "Append manifest entries" } else { "Write manifest" }
+if ($PSCmdlet.ShouldProcess($outFilePath, $writeAction)) {
+    ConvertTo-Json -InputObject @($outputManifests) -Depth 10 | Set-Content -Path $outFilePath
+    Write-Host "-> Generated single manifest: $outFilePath"
+}
 
 if (-not $EditMode) {
     Write-Host "Done! Processed $($files.Count) shortcut(s)."
