@@ -1,20 +1,24 @@
 # SRM Manifest Generator - TODO
 
-## Phase 1: Core CLI Script (High Priority)
+## Phase 1: Core CLI Script & Module Architecture (High Priority)
 - [x] Choose programming language and set up project structure.
-- [x] Implement argument parsing (input directory/files, output directory, template, single-file output flag, etc.).
+- [x] Refactor core engine into a reusable PowerShell module (`srmgen.psd1` / `srmgen.psm1`).
+- [x] Implement automated test suite (`tests/Test-SrmGen.ps1`).
+- [x] Implement argument parsing (input directory/files, output directory, single-file output flag, etc.).
 - [x] Implement `.lnk` parsing logic to extract target path, launch arguments, and icon/working directory.
 - [x] Implement JSON generation based on parsed `.lnk` data (mapping shortcut properties to manifest fields).
-- [x] Implement templating support (use a default template if none provided, allow user to specify a custom template).
-- [x] Implement output logic to write individual manifest JSON files to the output directory.
-- [x] Implement output concatenation feature (option to merge all generated manifests into a single `manifest.json` file).
+- [ ] Implement advanced templating support (custom template files, token expansion, cover/artwork fields).
+- [ ] Implement output granularity options (individual manifest JSON files per game vs. merged `manifest.json`).
+- [x] Implement output concatenation & deduplication feature (merge shortcuts into a single manifest, skipping duplicate targets).
+- [x] Write project documentation (`README.md`).
 
 ## Phase 2: Interactive CLI / TUI (Medium Priority)
-- [x] Integrate an interactive prompt library.
-- [ ] Implement an interactive mode that guides the user through parameter selection (input/output paths, template choices) if no CLI arguments are provided.
-- [ ] Add visual feedback (progress bars, success/error messages) for bulk processing.
+- [x] Integrate console TUI editor (`-TUI`) using alternate screen buffer.
+- [x] Implement sequential interactive property editor (`-Interactive`).
+- [ ] Implement an interactive setup wizard that guides the user through parameter selection if no CLI arguments are provided.
+- [ ] Add visual feedback (progress bars via `Write-Progress`) for bulk processing.
 
 ## Phase 3: GUI Wrapper (Low Priority / Optional)
-- [ ] Choose a lightweight GUI framework.
-- [ ] Build a simple form-based UI to select input/output folders and configure templates visually.
-- [ ] Connect the GUI inputs to execute the core script logic.
+- [ ] Choose a lightweight GUI framework (WPF/XAML recommended for Windows).
+- [ ] Build a simple form-based UI in `srmgenPSgui.ps1` to select input/output folders and configure templates visually.
+- [ ] Connect the GUI inputs to execute the core `srmgen` module cmdlets.
