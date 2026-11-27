@@ -22,3 +22,15 @@
 - [x] Choose a lightweight GUI framework (WPF/XAML with modern dark styling).
 - [x] Build an interactive form-based UI in `srmgenPSgui.ps1` with folder pickers, template selection, and an editable preview table.
 - [x] Connect the GUI inputs to execute the core `srmgen` module cmdlets with live DataGrid editing and File Explorer integration.
+
+## Phase 4: High Performance & Advanced Features (Completed)
+- [x] Multi-folder scanning support across one or multiple shortcut directories.
+- [x] Output granularity: PerFolder collated manifests, PerGame individual files, and Merged single files.
+- [x] Shortcut manifest database (`.srm_database.json`) caching SHA-256 hash of target executable and working directory.
+- [x] Incremental scan mode (`-SkipUnmodified` / GUI checkbox) to skip already scanned, unmodified shortcuts.
+- [x] Persistent application settings and folder history (`.srm_settings.json`).
+- [x] Multi-threaded parallel shortcut parsing via worker thread pool (`-Threads`).
+- [x] Live progress bar tracking parallel parsing percentage in CLI and GUI.
+- [x] Comprehensive console and error activity log in the GUI with copy/clear controls.
+- [x] Expanded automated test suite with 49 unit and integration tests.
+

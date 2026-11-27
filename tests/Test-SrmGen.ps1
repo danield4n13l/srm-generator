@@ -103,7 +103,7 @@ try {
         (New-SrmManifestEntry -Title "Game B" -Target "C:\Games\B.exe")
     )
 
-    Export-SrmManifest -Manifests $initialEntries -Path $testManifestPath -Force
+    Export-SrmManifest -Manifests $initialEntries -Path $testManifestPath -OutputMode 'Merged' -Force
     Assert-True "Manifest file created" (Test-Path $testManifestPath)
 
     $imported = Import-SrmManifest -Path $testManifestPath
@@ -117,7 +117,7 @@ try {
         (New-SrmManifestEntry -Title "Game C" -Target "C:\Games\C.exe")
     )
 
-    Export-SrmManifest -Manifests $appendEntries -Path $testManifestPath -Append
+    Export-SrmManifest -Manifests $appendEntries -Path $testManifestPath -OutputMode 'Merged' -Append
     $importedAfter = Import-SrmManifest -Path $testManifestPath
     Assert-Equal "Appended count deduplicated" $importedAfter.Count 3
     Assert-Equal "Third entry title" $importedAfter[2].title "Game C"
@@ -151,8 +151,111 @@ finally {
     Remove-Item -Recurse -Force $tempIndivDir -ErrorAction SilentlyContinue
 }
 
-# 8. Pipeline processing test
-Write-Host "`n8. Pipeline processing" -ForegroundColor White
+# 8. Manifest export (PerFolder Mode)
+Write-Host "`n8. Export-SrmManifest (PerFolder Mode)" -ForegroundColor White
+$tempPerFolderDir = Join-Path $env:TEMP "srmgen_pf_test_$([System.Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $tempPerFolderDir -Force | Out-Null
+
+try {
+    $pfEntries = @(
+        (New-SrmManifestEntry -Title "Game 1" -Target "C:\G1.exe" -SourceDirectory (Join-Path $scriptDir "TEST")),
+        (New-SrmManifestEntry -Title "Game 2" -Target "C:\G2.exe" -SourceDirectory (Join-Path $scriptDir "TEST"))
+    )
+
+    $pfFiles = Export-SrmManifest -Manifests $pfEntries -Path $tempPerFolderDir -OutputMode "PerFolder" -PassThru -Force
+    Assert-Equal "PerFolder exported 1 collated file" $pfFiles.Count 1
+    Assert-True "PerFolder file exists" (Test-Path $pfFiles[0])
+    Assert-True "Filename matches folder name pattern" ($pfFiles[0] -like "*D_TEST.manifest.json")
+}
+finally {
+    Remove-Item -Recurse -Force $tempPerFolderDir -ErrorAction SilentlyContinue
+}
+
+# 9. Shortcut Hash Generation
+Write-Host "`n9. Get-SrmItemHash" -ForegroundColor White
+$h1 = Get-SrmItemHash -Target "C:\Games\Game.exe" -StartIn "C:\Games"
+$h2 = Get-SrmItemHash -Target "C:\games\game.exe" -StartIn "c:\games\" # case insensitivity check
+$h3 = Get-SrmItemHash -Target "C:\Other\Game.exe" -StartIn "C:\Other"
+
+Assert-Equal "Hash length is 64 hex characters" $h1.Length 64
+Assert-True "Hashes for identical paths are equal" ($h1 -eq (Get-SrmItemHash -Target "C:\Games\Game.exe" -StartIn "C:\Games"))
+Assert-True "Hashes for different targets differ" ($h1 -ne $h3)
+
+# 10. Database Caching & Persistence
+Write-Host "`n10. Get-SrmDatabase & Save-SrmDatabase" -ForegroundColor White
+$tempDbPath = Join-Path $env:TEMP "srm_test_db_$([System.Guid]::NewGuid().ToString('N')).json"
+try {
+    $db = Get-SrmDatabase -DatabasePath $tempDbPath
+    Assert-Equal "New database has 0 records" $db.Shortcuts.Count 0
+
+    $db.Shortcuts["C:\test.lnk"] = [pscustomobject]@{
+        shortcutPath = "C:\test.lnk"
+        target       = "C:\test.exe"
+        itemHash     = $h1
+    }
+
+    Save-SrmDatabase -Database $db -DatabasePath $tempDbPath
+    Assert-True "Database file saved to disk" (Test-Path $tempDbPath)
+
+    $reloadedDb = Get-SrmDatabase -DatabasePath $tempDbPath
+    Assert-Equal "Reloaded database has 1 record" $reloadedDb.Shortcuts.Count 1
+    Assert-Equal "Target matches in reloaded DB" $reloadedDb.Shortcuts["C:\test.lnk"].target "C:\test.exe"
+}
+finally {
+    Remove-Item -Force $tempDbPath -ErrorAction SilentlyContinue
+}
+
+# 11. Application Settings Persistence
+Write-Host "`n11. Get-SrmSettings & Save-SrmSettings" -ForegroundColor White
+$tempSettingsPath = Join-Path $env:TEMP "srm_test_settings_$([System.Guid]::NewGuid().ToString('N')).json"
+try {
+    $settings = Get-SrmSettings -SettingsPath $tempSettingsPath
+    Assert-Equal "Default output mode is PerFolder" $settings.LastOutputMode "PerFolder"
+
+    $settings.RecentInputFolders = @("C:\Games1", "C:\Games2")
+    $settings.LastOutputPath     = "D:\SRM"
+    $settings.LastOutputMode     = "PerGame"
+    $settings.SkipUnmodified     = $true
+
+    Save-SrmSettings -Settings $settings -SettingsPath $tempSettingsPath
+    Assert-True "Settings file saved to disk" (Test-Path $tempSettingsPath)
+
+    $reloadedSettings = Get-SrmSettings -SettingsPath $tempSettingsPath
+    Assert-Equal "Reloaded recent folder count" $reloadedSettings.RecentInputFolders.Count 2
+    Assert-Equal "Reloaded last output mode" $reloadedSettings.LastOutputMode "PerGame"
+    Assert-Equal "Reloaded skip unmodified" $reloadedSettings.SkipUnmodified $true
+}
+finally {
+    Remove-Item -Force $tempSettingsPath -ErrorAction SilentlyContinue
+}
+
+# 12. Parallel Scan & Database Hit
+Write-Host "`n12. Invoke-SrmParallelScan (Threaded + Cached)" -ForegroundColor White
+$testScanDbPath = Join-Path $env:TEMP "srm_test_scan_db_$([System.Guid]::NewGuid().ToString('N')).json"
+try {
+    $scanDb = Get-SrmDatabase -DatabasePath $testScanDbPath
+
+    # First pass: parse fresh
+    $firstScan = Invoke-SrmParallelScan -InputPaths (Join-Path $scriptDir "TEST") -Database $scanDb -ThreadCount 2
+    Assert-Equal "First scan parsed 3 shortcuts" $firstScan.Count 3
+    Assert-Equal "Database indexed 3 shortcuts" $scanDb.Shortcuts.Count 3
+
+    Save-SrmDatabase -Database $scanDb -DatabasePath $testScanDbPath
+
+    # Second pass: should hit cache
+    $secondScan = Invoke-SrmParallelScan -InputPaths (Join-Path $scriptDir "TEST") -Database $scanDb -ThreadCount 2
+    Assert-Equal "Second scan loaded 3 shortcuts from cache" $secondScan.Count 3
+
+    # Third pass with SkipUnmodified: should skip all 3
+    $thirdScan = Invoke-SrmParallelScan -InputPaths (Join-Path $scriptDir "TEST") -Database $scanDb -ThreadCount 2 -SkipUnmodified
+    Assert-Equal "Third scan with SkipUnmodified returned 0 entries" $thirdScan.Count 0
+}
+finally {
+    Remove-Item -Force $testScanDbPath -ErrorAction SilentlyContinue
+}
+
+# 13. Pipeline processing test
+Write-Host "`n13. Pipeline processing" -ForegroundColor White
 $piped = Get-ChildItem (Join-Path $scriptDir "TEST") -Filter "*.lnk" | ConvertFrom-LnkShortcut
 Assert-Equal "Pipeline parsed 3 shortcuts" $piped.Count 3
 

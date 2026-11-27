@@ -3,8 +3,8 @@
 Steam ROM Manager - Manifest Generator & Editor GUI
 .SYNOPSIS
 A graphical user interface (WPF) for srm-generator to parse Windows shortcuts (.lnk)
-and generate or edit Steam ROM Manager JSON manifests. Supports adaptive Light, Dark,
-and Auto (System) theming with high-contrast, native Windows-compatible UI elements.
+across multiple folders, utilizing database hash caching, multi-threading, templates,
+recent settings, progress tracking, and an integrated console/error log.
 #>
 
 # Ensure script runs in STA mode (required for WPF)
@@ -25,29 +25,38 @@ if (Test-Path $modulePath) {
 
 # Define model class for DataGrid two-way binding
 class SrmManifestItem {
+    [string]$Folder
     [string]$Title
     [string]$Target
     [string]$StartIn
     [string]$LaunchOptions
     [bool]$AppendArgsToExecutable
     [string]$Cover
+    [string]$ItemHash
+    [string]$SourceDirectory
 
     SrmManifestItem() {
+        $this.Folder = ""
         $this.Title = ""
         $this.Target = ""
         $this.StartIn = ""
         $this.LaunchOptions = ""
         $this.AppendArgsToExecutable = $false
         $this.Cover = ""
+        $this.ItemHash = ""
+        $this.SourceDirectory = ""
     }
 
-    SrmManifestItem([string]$t, [string]$tgt, [string]$si, [string]$lo, [bool]$aa, [string]$cov) {
+    SrmManifestItem([string]$fol, [string]$t, [string]$tgt, [string]$si, [string]$lo, [bool]$aa, [string]$cov, [string]$hash, [string]$srcDir) {
+        $this.Folder = $fol
         $this.Title = $t
         $this.Target = $tgt
         $this.StartIn = $si
         $this.LaunchOptions = $lo
         $this.AppendArgsToExecutable = $aa
         $this.Cover = $cov
+        $this.ItemHash = $hash
+        $this.SourceDirectory = $srcDir
     }
 }
 
@@ -56,8 +65,8 @@ class SrmManifestItem {
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="Steam ROM Manager - Manifest Generator &amp; Editor"
-    Height="750" Width="1060"
-    MinHeight="600" MinWidth="880"
+    Height="820" Width="1120"
+    MinHeight="650" MinWidth="920"
     WindowStartupLocation="CenterScreen"
     Background="{DynamicResource BgWindow}"
     Foreground="{DynamicResource FgPrimary}"
@@ -65,28 +74,28 @@ class SrmManifestItem {
 
     <Window.Resources>
         <!-- Theme Brushes (Default values; updated dynamically by Apply-Theme) -->
-        <SolidColorBrush x:Key="BgWindow" Color="#18181f"/>
-        <SolidColorBrush x:Key="BgCard" Color="#22222a"/>
-        <SolidColorBrush x:Key="BgCardHeader" Color="#282834"/>
-        <SolidColorBrush x:Key="BgInput" Color="#1b1b22"/>
-        <SolidColorBrush x:Key="BorderBrush" Color="#383848"/>
-        <SolidColorBrush x:Key="BorderSubtle" Color="#2c2c3a"/>
-        <SolidColorBrush x:Key="FgPrimary" Color="#f0f0f5"/>
-        <SolidColorBrush x:Key="FgMuted" Color="#9a9aa8"/>
-        <SolidColorBrush x:Key="BgGridRow" Color="#1e1e26"/>
-        <SolidColorBrush x:Key="BgGridRowAlt" Color="#181820"/>
-        <SolidColorBrush x:Key="BgGridHeader" Color="#262632"/>
-        <SolidColorBrush x:Key="FgGridHeader" Color="#f0f0f5"/>
+        <SolidColorBrush x:Key="BgWindow" Color="#16161b"/>
+        <SolidColorBrush x:Key="BgCard" Color="#202028"/>
+        <SolidColorBrush x:Key="BgCardHeader" Color="#262632"/>
+        <SolidColorBrush x:Key="BgInput" Color="#181820"/>
+        <SolidColorBrush x:Key="BorderBrush" Color="#363644"/>
+        <SolidColorBrush x:Key="BorderSubtle" Color="#2a2a36"/>
+        <SolidColorBrush x:Key="FgPrimary" Color="#f2f2f7"/>
+        <SolidColorBrush x:Key="FgMuted" Color="#9c9ca8"/>
+        <SolidColorBrush x:Key="BgGridRow" Color="#1c1c24"/>
+        <SolidColorBrush x:Key="BgGridRowAlt" Color="#17171e"/>
+        <SolidColorBrush x:Key="BgGridHeader" Color="#252530"/>
+        <SolidColorBrush x:Key="FgGridHeader" Color="#f2f2f7"/>
         <SolidColorBrush x:Key="BgGridLines" Color="#2c2c3a"/>
         <SolidColorBrush x:Key="BgSelection" Color="#2563eb"/>
         <SolidColorBrush x:Key="FgSelection" Color="#ffffff"/>
-        <SolidColorBrush x:Key="BtnDefaultBg" Color="#2c2c38"/>
-        <SolidColorBrush x:Key="BtnDefaultFg" Color="#f0f0f5"/>
+        <SolidColorBrush x:Key="BtnDefaultBg" Color="#2a2a36"/>
+        <SolidColorBrush x:Key="BtnDefaultFg" Color="#f2f2f7"/>
         <SolidColorBrush x:Key="BtnPrimaryBg" Color="#1d5599"/>
         <SolidColorBrush x:Key="BtnPrimaryFg" Color="#ffffff"/>
         <SolidColorBrush x:Key="BtnSuccessBg" Color="#238636"/>
         <SolidColorBrush x:Key="BtnSuccessFg" Color="#ffffff"/>
-        <SolidColorBrush x:Key="StatusBg" Color="#14141a"/>
+        <SolidColorBrush x:Key="StatusBg" Color="#131318"/>
 
         <!-- TextBlock Default Style -->
         <Style TargetType="TextBlock">
@@ -124,13 +133,33 @@ class SrmManifestItem {
             </Setter>
         </Style>
 
+        <!-- ListBox Default Style -->
+        <Style TargetType="ListBox">
+            <Setter Property="Background" Value="{DynamicResource BgInput}"/>
+            <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+
+        <Style TargetType="ListBoxItem">
+            <Setter Property="Padding" Value="6,3"/>
+            <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource BgSelection}"/>
+                    <Setter Property="Foreground" Value="{DynamicResource FgSelection}"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
         <!-- Button Default Style -->
         <Style TargetType="Button">
             <Setter Property="Background" Value="{DynamicResource BtnDefaultBg}"/>
             <Setter Property="Foreground" Value="{DynamicResource BtnDefaultFg}"/>
             <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="12,5"/>
+            <Setter Property="Padding" Value="10,5"/>
             <Setter Property="FontSize" Value="12"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Template">
@@ -256,43 +285,46 @@ class SrmManifestItem {
         </Style>
     </Window.Resources>
 
-    <Grid Margin="16">
+    <Grid Margin="14">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/> <!-- Header -->
+            <RowDefinition Height="Auto"/> <!-- Source Folders & Config -->
+            <RowDefinition Height="*"/>    <!-- DataGrid -->
+            <RowDefinition Height="Auto"/> <!-- Progress & Console Log -->
+            <RowDefinition Height="Auto"/> <!-- Status Bar -->
         </Grid.RowDefinitions>
 
         <!-- Header Bar -->
-        <Border Grid.Row="0" Margin="0,0,0,14" Padding="14,10" Background="{DynamicResource BgCard}" CornerRadius="6" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+        <Border Grid.Row="0" Margin="0,0,0,10" Padding="12,8" Background="{DynamicResource BgCard}" CornerRadius="6" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <StackPanel Grid.Column="0">
-                    <TextBlock Text="Steam ROM Manager - Manifest Generator" FontSize="18" FontWeight="SemiBold" Foreground="{DynamicResource FgPrimary}"/>
-                    <TextBlock Text="Import Windows shortcuts (.lnk), customize launch properties, and export SRM manifests." FontSize="11" Foreground="{DynamicResource FgMuted}" Margin="0,2,0,0"/>
+                    <TextBlock Text="Steam ROM Manager - Manifest Generator" FontSize="17" FontWeight="SemiBold" Foreground="{DynamicResource FgPrimary}"/>
+                    <TextBlock Text="Multi-threaded batch shortcut parser, database hash cache, and manifest generator." FontSize="11" Foreground="{DynamicResource FgMuted}" Margin="0,1,0,0"/>
                 </StackPanel>
 
-                <!-- Theme Switcher (Auto / Dark / Light) -->
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,14,0">
+                <!-- Theme Switcher -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0">
                     <TextBlock Text="Theme:" VerticalAlignment="Center" Margin="0,0,6,0" Foreground="{DynamicResource FgMuted}" FontWeight="SemiBold"/>
-                    <ComboBox Name="cmbTheme" Width="135">
+                    <ComboBox Name="cmbTheme" Width="130">
                         <ComboBoxItem Content="⚙️ Auto (System)" IsSelected="True"/>
                         <ComboBoxItem Content="🌙 Dark Mode"/>
                         <ComboBoxItem Content="☀️ Light Mode"/>
                     </ComboBox>
                 </StackPanel>
 
-                <Button Name="btnLoadJson" Grid.Column="2" Content="📂 Open Existing Manifest" Background="{DynamicResource BtnPrimaryBg}" Foreground="{DynamicResource BtnPrimaryFg}" BorderBrush="{DynamicResource BorderBrush}" Padding="12,6" FontWeight="SemiBold"/>
+                <Button Name="btnSaveCustomTemplate" Grid.Column="2" Content="💾 Save Template" Margin="0,0,8,0" Padding="10,5"/>
+                <Button Name="btnLoadJson" Grid.Column="3" Content="📂 Open Manifest" Background="{DynamicResource BtnPrimaryBg}" Foreground="{DynamicResource BtnPrimaryFg}" BorderBrush="{DynamicResource BorderBrush}" Padding="10,5" FontWeight="SemiBold"/>
             </Grid>
         </Border>
 
-        <!-- Settings Card -->
-        <Border Grid.Row="1" Margin="0,0,0,12" Padding="14" Background="{DynamicResource BgCard}" CornerRadius="6" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+        <!-- Source Folders & Settings Card -->
+        <Border Grid.Row="1" Margin="0,0,0,10" Padding="12" Background="{DynamicResource BgCard}" CornerRadius="6" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -300,68 +332,93 @@ class SrmManifestItem {
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
-                <!-- Row 1: Source Shortcut Folder -->
-                <Grid Grid.Row="0" Margin="0,0,0,10">
+                <!-- Row 1: Multi-Folder Source Selection -->
+                <Grid Grid.Row="0" Margin="0,0,0,8">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="130"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="Shortcuts Source:" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource FgPrimary}"/>
-                    <TextBox Name="txtInputPath" Grid.Column="1" Margin="0,0,8,0"/>
-                    <Button Name="btnBrowseInput" Grid.Column="2" Content="Browse Folder..." Margin="0,0,8,0"/>
-                    <Button Name="btnScan" Grid.Column="3" Content="⚡ Scan &amp; Load Shortcuts" Background="{DynamicResource BtnPrimaryBg}" Foreground="{DynamicResource BtnPrimaryFg}" BorderBrush="{DynamicResource BorderBrush}" FontWeight="SemiBold" Padding="14,5"/>
+                    <StackPanel Grid.Column="0" VerticalAlignment="Top">
+                        <TextBlock Text="Source Folders:" FontWeight="SemiBold" Foreground="{DynamicResource FgPrimary}"/>
+                        <TextBlock Text="Shortcut directories" FontSize="10" Foreground="{DynamicResource FgMuted}"/>
+                    </StackPanel>
+                    
+                    <ListBox Name="lstFolders" Grid.Column="1" Height="68" Margin="0,0,8,0"/>
+
+                    <StackPanel Grid.Column="2" VerticalAlignment="Top">
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <Button Name="btnAddFolder" Content="➕ Add Folder..." Margin="0,0,6,0" Padding="8,4"/>
+                            <Button Name="btnRemoveFolder" Content="➖ Remove" Margin="0,0,6,0" Padding="8,4"/>
+                            <Button Name="btnClearFolders" Content="Clear" Padding="8,4"/>
+                        </StackPanel>
+                        <ComboBox Name="cmbRecentFolders" Width="220" Margin="0,2,0,0" Padding="6,3">
+                            <ComboBoxItem Content="Recent Folders..." IsSelected="True"/>
+                        </ComboBox>
+                    </StackPanel>
                 </Grid>
 
-                <!-- Row 2: Destination Output -->
-                <Grid Grid.Row="1" Margin="0,0,0,10">
+                <!-- Row 2: Destination Output & Modes -->
+                <Grid Grid.Row="1" Margin="0,0,0,8">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="130"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="140"/>
+                        <ColumnDefinition Width="120"/>
                         <ColumnDefinition Width="180"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="Output Directory:" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource FgPrimary}"/>
+                    <TextBlock Grid.Column="0" Text="Output Folder:" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource FgPrimary}"/>
                     <TextBox Name="txtOutputPath" Grid.Column="1" Margin="0,0,8,0"/>
                     <Button Name="btnBrowseOutput" Grid.Column="2" Content="Browse..." Margin="0,0,12,0"/>
-                    <TextBlock Grid.Column="3" Text="Custom Filename:" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,8,0" Foreground="{DynamicResource FgPrimary}"/>
+                    <TextBlock Grid.Column="3" Text="Output Filename:" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,6,0" Foreground="{DynamicResource FgPrimary}"/>
                     <TextBox Name="txtOutputFile" Grid.Column="4"/>
                 </Grid>
 
-                <!-- Row 3: Output Mode, Template & Flags -->
+                <!-- Row 3: Output Mode, Template, Threads & Flags -->
                 <Grid Grid.Row="2">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="130"/>
+                        <ColumnDefinition Width="210"/>
+                        <ColumnDefinition Width="80"/>
                         <ColumnDefinition Width="180"/>
-                        <ColumnDefinition Width="90"/>
-                        <ColumnDefinition Width="220"/>
+                        <ColumnDefinition Width="65"/>
+                        <ColumnDefinition Width="65"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="Output Mode:" VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource FgPrimary}"/>
-                    <ComboBox Name="cmbOutputMode" Grid.Column="1" Margin="0,0,12,0">
-                        <ComboBoxItem Content="Merged (Single File)" IsSelected="True"/>
-                        <ComboBoxItem Content="Individual (Per-Game Files)"/>
+                    <ComboBox Name="cmbOutputMode" Grid.Column="1" Margin="0,0,10,0">
+                        <ComboBoxItem Content="Per Folder (Collated Manifest)" IsSelected="True"/>
+                        <ComboBoxItem Content="Per Game (Individual Manifests)"/>
+                        <ComboBoxItem Content="Single Merged File (All Games)"/>
                     </ComboBox>
 
-                    <TextBlock Grid.Column="2" Text="Template:" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,8,0" FontWeight="SemiBold" Foreground="{DynamicResource FgPrimary}"/>
-                    <ComboBox Name="cmbTemplate" Grid.Column="3" Margin="0,0,16,0">
+                    <TextBlock Grid.Column="2" Text="Template:" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,6,0" FontWeight="SemiBold" Foreground="{DynamicResource FgPrimary}"/>
+                    <ComboBox Name="cmbTemplate" Grid.Column="3" Margin="0,0,10,0">
                         <ComboBoxItem Content="Default (Standard SRM)" IsSelected="True"/>
                         <ComboBoxItem Content="Artwork (With Grid Fields)"/>
                         <ComboBoxItem Content="Browse Custom Template..."/>
                     </ComboBox>
 
-                    <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center">
-                        <CheckBox Name="chkAppend" Content="Append to Existing" Margin="0,0,16,0"/>
-                        <CheckBox Name="chkForce" Content="Overwrite (Force)" Margin="0,0,8,0"/>
+                    <TextBlock Grid.Column="4" Text="Threads:" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,4,0" FontWeight="SemiBold" Foreground="{DynamicResource FgPrimary}"/>
+                    <ComboBox Name="cmbThreads" Grid.Column="5" Margin="0,0,12,0">
+                        <ComboBoxItem Content="1"/>
+                        <ComboBoxItem Content="2"/>
+                        <ComboBoxItem Content="4" IsSelected="True"/>
+                        <ComboBoxItem Content="8"/>
+                        <ComboBoxItem Content="16"/>
+                    </ComboBox>
+
+                    <StackPanel Grid.Column="6" Orientation="Horizontal" VerticalAlignment="Center">
+                        <CheckBox Name="chkSkipUnmodified" Content="⚡ Skip Unmodified (Cache)" Margin="0,0,12,0" IsChecked="True"/>
+                        <CheckBox Name="chkAppend" Content="Append" Margin="0,0,12,0"/>
+                        <CheckBox Name="chkForce" Content="Force Overwrite"/>
                     </StackPanel>
                 </Grid>
             </Grid>
         </Border>
 
-        <!-- Data Grid & Table Actions -->
-        <Border Grid.Row="2" Padding="12" Background="{DynamicResource BgCard}" CornerRadius="6" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+        <!-- Data Grid Card -->
+        <Border Grid.Row="2" Padding="10" Background="{DynamicResource BgCard}" CornerRadius="6" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -369,7 +426,7 @@ class SrmManifestItem {
                 </Grid.RowDefinitions>
 
                 <!-- Action Toolbar -->
-                <Grid Grid.Row="0" Margin="0,0,0,10">
+                <Grid Grid.Row="0" Margin="0,0,0,8">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
@@ -378,14 +435,16 @@ class SrmManifestItem {
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <Button Name="btnAddRow" Grid.Column="0" Content="+ Add Game" Margin="0,0,8,0"/>
-                    <Button Name="btnRemoveRow" Grid.Column="1" Content="- Remove Selected" Margin="0,0,8,0"/>
-                    <Button Name="btnClearAll" Grid.Column="2" Content="Clear Table" Margin="0,0,12,0"/>
-                    <TextBlock Name="lblItemCount" Grid.Column="3" Text="0 games loaded" VerticalAlignment="Center" Foreground="{DynamicResource FgMuted}" FontWeight="SemiBold"/>
+                    <Button Name="btnAddRow" Grid.Column="0" Content="+ Add Game" Margin="0,0,6,0"/>
+                    <Button Name="btnRemoveRow" Grid.Column="1" Content="- Remove Selected" Margin="0,0,6,0"/>
+                    <Button Name="btnClearAll" Grid.Column="2" Content="Clear Table" Margin="0,0,10,0"/>
+                    <TextBlock Name="lblItemCount" Grid.Column="3" Text="0 game(s) loaded" VerticalAlignment="Center" Foreground="{DynamicResource FgMuted}" FontWeight="SemiBold"/>
 
-                    <Button Name="btnWhatIf" Grid.Column="5" Content="🔍 Simulate (WhatIf)" Margin="0,0,8,0" Padding="12,5"/>
-                    <Button Name="btnExport" Grid.Column="6" Content="💾 Generate &amp; Save Manifest" Background="{DynamicResource BtnSuccessBg}" Foreground="{DynamicResource BtnSuccessFg}" BorderBrush="{DynamicResource BorderBrush}" FontWeight="SemiBold" Padding="16,5"/>
+                    <Button Name="btnScan" Grid.Column="5" Content="⚡ Scan Shortcuts" Background="{DynamicResource BtnPrimaryBg}" Foreground="{DynamicResource BtnPrimaryFg}" BorderBrush="{DynamicResource BorderBrush}" FontWeight="SemiBold" Margin="0,0,8,0" Padding="14,5"/>
+                    <Button Name="btnWhatIf" Grid.Column="6" Content="🔍 Simulate (WhatIf)" Margin="0,0,8,0" Padding="10,5"/>
+                    <Button Name="btnExport" Grid.Column="7" Content="💾 Export Manifest(s)" Background="{DynamicResource BtnSuccessBg}" Foreground="{DynamicResource BtnSuccessFg}" BorderBrush="{DynamicResource BorderBrush}" FontWeight="SemiBold" Padding="16,5"/>
                 </Grid>
 
                 <!-- DataGrid -->
@@ -407,7 +466,6 @@ class SrmManifestItem {
                     HeadersVisibility="Column"
                     FontSize="12">
                     <DataGrid.Resources>
-                        <!-- Cell Editing TextBox Style: prevents white-on-white text during in-cell editing -->
                         <Style TargetType="TextBox">
                             <Setter Property="Background" Value="{DynamicResource BgInput}"/>
                             <Setter Property="Foreground" Value="{DynamicResource FgPrimary}"/>
@@ -442,26 +500,65 @@ class SrmManifestItem {
                         </Style>
                     </DataGrid.ColumnHeaderStyle>
                     <DataGrid.Columns>
-                        <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="200"/>
-                        <DataGridTextColumn Header="Target (Executable Path)" Binding="{Binding Target}" Width="280"/>
-                        <DataGridTextColumn Header="Start In (Working Directory)" Binding="{Binding StartIn}" Width="220"/>
-                        <DataGridTextColumn Header="Launch Options" Binding="{Binding LaunchOptions}" Width="150"/>
-                        <DataGridCheckBoxColumn Header="Append Args" Binding="{Binding AppendArgsToExecutable}" Width="90"/>
-                        <DataGridTextColumn Header="Cover / Artwork" Binding="{Binding Cover}" Width="120"/>
+                        <DataGridTextColumn Header="Folder" Binding="{Binding Folder}" Width="110" IsReadOnly="True"/>
+                        <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="190"/>
+                        <DataGridTextColumn Header="Target (Executable Path)" Binding="{Binding Target}" Width="260"/>
+                        <DataGridTextColumn Header="Start In (Working Directory)" Binding="{Binding StartIn}" Width="190"/>
+                        <DataGridTextColumn Header="Launch Options" Binding="{Binding LaunchOptions}" Width="130"/>
+                        <DataGridCheckBoxColumn Header="Append Args" Binding="{Binding AppendArgsToExecutable}" Width="85"/>
+                        <DataGridTextColumn Header="Cover / Artwork" Binding="{Binding Cover}" Width="110"/>
+                        <DataGridTextColumn Header="Hash" Binding="{Binding ItemHash}" Width="90" IsReadOnly="True"/>
                     </DataGrid.Columns>
                 </DataGrid>
             </Grid>
         </Border>
 
+        <!-- Progress Bar & Console / Error Log Card -->
+        <Border Grid.Row="3" Margin="0,8,0,0" Padding="10,8" Background="{DynamicResource BgCard}" CornerRadius="6" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Progress Bar Row -->
+                <Grid Grid.Row="0" Margin="0,0,0,6">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <ProgressBar Name="pbScan" Height="14" Minimum="0" Maximum="100" Value="0" Background="{DynamicResource BgInput}" BorderBrush="{DynamicResource BorderBrush}" Foreground="{DynamicResource BgSelection}"/>
+                    <TextBlock Name="lblProgress" Grid.Column="1" Text="Idle" Margin="8,0,0,0" FontSize="11" Foreground="{DynamicResource FgMuted}" FontWeight="SemiBold"/>
+                </Grid>
+
+                <!-- Console Log Header & Controls -->
+                <Grid Grid.Row="1" Margin="0,2,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Console &amp; Error Activity Log:" FontWeight="SemiBold" FontSize="11" Foreground="{DynamicResource FgMuted}"/>
+                    <Button Name="btnCopyLog" Grid.Column="1" Content="📋 Copy Log" Margin="0,0,6,0" Padding="8,2" FontSize="11"/>
+                    <Button Name="btnClearLog" Grid.Column="2" Content="🗑️ Clear Log" Padding="8,2" FontSize="11"/>
+                </Grid>
+
+                <!-- Console Log Scrollable Box -->
+                <TextBox Name="txtConsoleLog" Grid.Row="2" Height="85" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                         FontFamily="Consolas" FontSize="11" Background="{DynamicResource StatusBg}" Foreground="{DynamicResource FgPrimary}" BorderBrush="{DynamicResource BorderSubtle}"/>
+            </Grid>
+        </Border>
+
         <!-- Bottom Status Bar -->
-        <Border Grid.Row="3" Margin="0,10,0,0" Padding="8,5" Background="{DynamicResource StatusBg}" CornerRadius="4" BorderBrush="{DynamicResource BorderSubtle}" BorderThickness="1">
+        <Border Grid.Row="4" Margin="0,6,0,0" Padding="8,4" Background="{DynamicResource StatusBg}" CornerRadius="4" BorderBrush="{DynamicResource BorderSubtle}" BorderThickness="1">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <TextBlock Name="txtStatus" Grid.Column="0" Text="Ready. Select a shortcut folder or open a manifest to begin." Foreground="{DynamicResource FgMuted}" FontSize="11"/>
-                <TextBlock Grid.Column="1" Text="SRM Generator v1.1" Foreground="{DynamicResource FgMuted}" FontSize="10"/>
+                <TextBlock Name="txtStatus" Grid.Column="0" Text="Ready." Foreground="{DynamicResource FgMuted}" FontSize="11"/>
+                <TextBlock Grid.Column="1" Text="SRM Generator v1.2" Foreground="{DynamicResource FgMuted}" FontSize="10"/>
             </Grid>
         </Border>
     </Grid>
@@ -472,34 +569,48 @@ $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
 
 # Get Controls
-$txtInputPath    = $window.FindName("txtInputPath")
-$btnBrowseInput  = $window.FindName("btnBrowseInput")
-$btnScan         = $window.FindName("btnScan")
-$txtOutputPath   = $window.FindName("txtOutputPath")
-$btnBrowseOutput = $window.FindName("btnBrowseOutput")
-$txtOutputFile   = $window.FindName("txtOutputFile")
-$cmbOutputMode   = $window.FindName("cmbOutputMode")
-$cmbTemplate     = $window.FindName("cmbTemplate")
-$chkAppend       = $window.FindName("chkAppend")
-$chkForce        = $window.FindName("chkForce")
-$btnLoadJson     = $window.FindName("btnLoadJson")
-$btnAddRow       = $window.FindName("btnAddRow")
-$btnRemoveRow    = $window.FindName("btnRemoveRow")
-$btnClearAll     = $window.FindName("btnClearAll")
-$lblItemCount    = $window.FindName("lblItemCount")
-$btnWhatIf       = $window.FindName("btnWhatIf")
-$btnExport       = $window.FindName("btnExport")
-$gridEntries     = $window.FindName("gridEntries")
-$txtStatus       = $window.FindName("txtStatus")
-$cmbTheme        = $window.FindName("cmbTheme")
+$lstFolders             = $window.FindName("lstFolders")
+$btnAddFolder           = $window.FindName("btnAddFolder")
+$btnRemoveFolder        = $window.FindName("btnRemoveFolder")
+$btnClearFolders        = $window.FindName("btnClearFolders")
+$cmbRecentFolders       = $window.FindName("cmbRecentFolders")
+$txtOutputPath          = $window.FindName("txtOutputPath")
+$btnBrowseOutput        = $window.FindName("btnBrowseOutput")
+$txtOutputFile          = $window.FindName("txtOutputFile")
+$cmbOutputMode          = $window.FindName("cmbOutputMode")
+$cmbTemplate            = $window.FindName("cmbTemplate")
+$cmbThreads             = $window.FindName("cmbThreads")
+$chkSkipUnmodified      = $window.FindName("chkSkipUnmodified")
+$chkAppend              = $window.FindName("chkAppend")
+$chkForce               = $window.FindName("chkForce")
+$btnLoadJson            = $window.FindName("btnLoadJson")
+$btnSaveCustomTemplate  = $window.FindName("btnSaveCustomTemplate")
+$btnAddRow              = $window.FindName("btnAddRow")
+$btnRemoveRow           = $window.FindName("btnRemoveRow")
+$btnClearAll            = $window.FindName("btnClearAll")
+$lblItemCount           = $window.FindName("lblItemCount")
+$btnScan                = $window.FindName("btnScan")
+$btnWhatIf              = $window.FindName("btnWhatIf")
+$btnExport              = $window.FindName("btnExport")
+$gridEntries            = $window.FindName("gridEntries")
+$pbScan                 = $window.FindName("pbScan")
+$lblProgress            = $window.FindName("lblProgress")
+$btnCopyLog             = $window.FindName("btnCopyLog")
+$btnClearLog            = $window.FindName("btnClearLog")
+$txtConsoleLog          = $window.FindName("txtConsoleLog")
+$txtStatus              = $window.FindName("txtStatus")
+$cmbTheme               = $window.FindName("cmbTheme")
 
-# Observable collection for DataGrid
+# Observable collections
 $itemsCollection = [System.Collections.ObjectModel.ObservableCollection[SrmManifestItem]]::new()
 $gridEntries.ItemsSource = $itemsCollection
 
+# State
 $script:customTemplatePath = $null
+$script:settings = Get-SrmSettings
+$script:database = Get-SrmDatabase
 
-# High-contrast, meticulously matched Dark and Light palettes
+# High-contrast Dark and Light theme palettes
 $script:ThemePalettes = @{
     Dark = @{
         BgWindow       = "#16161b"
@@ -558,7 +669,6 @@ function Apply-Theme([string]$selectedMode) {
     } elseif ($selectedMode -like "*Dark*") {
         $theme = "Dark"
     } else {
-        # Auto (System) - detect Windows registry preference
         try {
             $regVal = Get-ItemPropertyValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "AppsUseLightTheme" -ErrorAction Stop
             $theme = if ($regVal -ne 0) { "Light" } else { "Dark" }
@@ -575,6 +685,15 @@ function Apply-Theme([string]$selectedMode) {
     }
 }
 
+function Write-GuiLog([string]$level, [string]$message) {
+    $timestamp = (Get-Date).ToString("HH:mm:ss")
+    $logLine = "[$timestamp] [$level] $message"
+    $window.Dispatcher.Invoke([Action]{
+        $txtConsoleLog.AppendText("$logLine`r`n")
+        $txtConsoleLog.ScrollToEnd()
+    })
+}
+
 function Update-Status([string]$message) {
     $txtStatus.Text = $message
 }
@@ -589,23 +708,63 @@ $cmbTheme.Add_SelectionChanged({
     if ($cmbTheme.SelectedItem) {
         $choice = [string]$cmbTheme.SelectedItem.Content
         Apply-Theme $choice
-        Update-Status "Applied theme: $choice"
+        Write-GuiLog "INFO" "Applied theme: $choice"
     }
 })
 
-# Browse Input Folder
-$btnBrowseInput.Add_Click({
+# Log controls
+$btnCopyLog.Add_Click({
+    if (![string]::IsNullOrEmpty($txtConsoleLog.Text)) {
+        [System.Windows.Clipboard]::SetText($txtConsoleLog.Text)
+        Update-Status "Console log copied to clipboard."
+    }
+})
+
+$btnClearLog.Add_Click({
+    $txtConsoleLog.Clear()
+    Update-Status "Console log cleared."
+})
+
+# Folder management
+$btnAddFolder.Add_Click({
     $dialog = [System.Windows.Forms.FolderBrowserDialog]::new()
     $dialog.Description = "Select a folder containing .lnk shortcuts"
-    if (![string]::IsNullOrWhiteSpace($txtInputPath.Text) -and (Test-Path $txtInputPath.Text)) {
-        $dialog.SelectedPath = $txtInputPath.Text
-    }
     if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        $txtInputPath.Text = $dialog.SelectedPath
-        if ([string]::IsNullOrWhiteSpace($txtOutputPath.Text)) {
-            $txtOutputPath.Text = $dialog.SelectedPath
+        $path = $dialog.SelectedPath
+        if (-not $lstFolders.Items.Contains($path)) {
+            [void]$lstFolders.Items.Add($path)
+            Write-GuiLog "INFO" "Added source folder: $path"
+            if ([string]::IsNullOrWhiteSpace($txtOutputPath.Text)) {
+                $txtOutputPath.Text = $path
+            }
         }
-        Update-Status "Selected input folder: $($dialog.SelectedPath)"
+    }
+})
+
+$btnRemoveFolder.Add_Click({
+    $selected = $lstFolders.SelectedItem
+    if ($null -ne $selected) {
+        $lstFolders.Items.Remove($selected)
+        Write-GuiLog "INFO" "Removed source folder: $selected"
+    }
+})
+
+$btnClearFolders.Add_Click({
+    $lstFolders.Items.Clear()
+    Write-GuiLog "INFO" "Cleared all source folders."
+})
+
+$cmbRecentFolders.Add_SelectionChanged({
+    if ($cmbRecentFolders.SelectedIndex -gt 0) {
+        $folder = [string]$cmbRecentFolders.SelectedItem
+        if (![string]::IsNullOrWhiteSpace($folder) -and (Test-Path $folder) -and -not $lstFolders.Items.Contains($folder)) {
+            [void]$lstFolders.Items.Add($folder)
+            Write-GuiLog "INFO" "Added recent folder: $folder"
+            if ([string]::IsNullOrWhiteSpace($txtOutputPath.Text)) {
+                $txtOutputPath.Text = $folder
+            }
+        }
+        $cmbRecentFolders.SelectedIndex = 0
     }
 })
 
@@ -618,7 +777,7 @@ $btnBrowseOutput.Add_Click({
     }
     if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         $txtOutputPath.Text = $dialog.SelectedPath
-        Update-Status "Selected output folder: $($dialog.SelectedPath)"
+        Write-GuiLog "INFO" "Selected output folder: $($dialog.SelectedPath)"
     }
 })
 
@@ -626,13 +785,12 @@ $btnBrowseOutput.Add_Click({
 $cmbTemplate.Add_SelectionChanged({
     $idx = $cmbTemplate.SelectedIndex
     if ($idx -eq 2) {
-        # Custom template
         $dialog = [System.Windows.Forms.OpenFileDialog]::new()
         $dialog.Filter = "JSON Template (*.json)|*.json|All Files (*.*)|*.*"
         $dialog.Title = "Select Custom JSON Template"
         if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             $script:customTemplatePath = $dialog.FileName
-            Update-Status "Custom template selected: $($dialog.FileName)"
+            Write-GuiLog "INFO" "Loaded custom template: $($dialog.FileName)"
         } else {
             $cmbTemplate.SelectedIndex = 0
         }
@@ -641,55 +799,113 @@ $cmbTemplate.Add_SelectionChanged({
     }
 })
 
-# Scan & Parse Shortcuts
+# Save current custom template
+$btnSaveCustomTemplate.Add_Click({
+    $dialog = [System.Windows.Forms.SaveFileDialog]::new()
+    $dialog.Filter = "JSON Template (*.json)|*.json"
+    $dialog.Title = "Save Current Template Preset"
+    $dialog.FileName = "custom.template.json"
+    $templatesDir = Join-Path $PSScriptRoot "templates"
+    if (Test-Path $templatesDir) { $dialog.InitialDirectory = $templatesDir }
+
+    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $tpl = [ordered]@{
+            title                  = "{{title}}"
+            target                 = "{{target}}"
+            startIn                = "{{startIn}}"
+            launchOptions          = "{{launchOptions}}"
+            appendArgsToExecutable = $false
+            cover                  = ""
+        }
+        $tpl | ConvertTo-Json -Depth 5 | Set-Content -Path $dialog.FileName -Encoding UTF8
+        Write-GuiLog "SUCCESS" "Template preset saved: $($dialog.FileName)"
+        [System.Windows.MessageBox]::Show("Template saved successfully to:`n$($dialog.FileName)", "Template Saved", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
+    }
+})
+
+# Scan & Parse Shortcuts (Threaded)
 $btnScan.Add_Click({
-    $inPath = $txtInputPath.Text.Trim()
-    if ([string]::IsNullOrWhiteSpace($inPath) -or !(Test-Path $inPath)) {
-        [System.Windows.MessageBox]::Show("Please specify a valid shortcut folder or file path.", "Invalid Source", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning)
+    if ($lstFolders.Items.Count -eq 0) {
+        [System.Windows.MessageBox]::Show("Please add at least one folder containing .lnk shortcuts.", "No Source Folders", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning)
         return
     }
 
-    Update-Status "Scanning shortcuts in $inPath..."
-
-    $files = @()
-    if (Test-Path $inPath -PathType Leaf) {
-        if ($inPath -match '\.lnk$') { $files += Get-Item $inPath }
-    } else {
-        $files = @(Get-ChildItem -Path $inPath -Filter "*.lnk" -File)
-    }
-
-    if ($files.Count -eq 0) {
-        [System.Windows.MessageBox]::Show("No .lnk shortcuts were found in the selected folder.", "No Shortcuts Found", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
-        Update-Status "No shortcuts found."
-        return
-    }
+    $folderPaths = @($lstFolders.Items)
+    $threadCount = [int]$cmbThreads.Text
+    if ($threadCount -le 0) { $threadCount = 4 }
+    $skipUnmod = [bool]$chkSkipUnmodified.IsChecked
 
     $templateName = if ($cmbTemplate.SelectedIndex -eq 1) { 'artwork' } elseif ($script:customTemplatePath) { $script:customTemplatePath } else { 'default' }
     $templateObj = Get-SrmTemplate -Template $templateName
 
-    $itemsCollection.Clear()
-    $parsedCount = 0
+    # UI setup for scan
+    $btnScan.IsEnabled = $false
+    $btnExport.IsEnabled = $false
+    $pbScan.Value = 0
+    $lblProgress.Text = "Scanning folders..."
+    Update-Status "Starting parallel scan across $($folderPaths.Count) folder(s)..."
+    Write-GuiLog "INFO" "Starting scan across $($folderPaths.Count) folder(s) ($threadCount threads, SkipUnmodified: $skipUnmod)..."
 
-    foreach ($file in $files) {
-        $sc = ConvertFrom-LnkShortcut -Path $file.FullName
-        if ($null -eq $sc) { continue }
-
-        $entry = New-SrmManifestEntry `
-            -Title $sc.Title `
-            -Target $sc.Target `
-            -StartIn $sc.StartIn `
-            -LaunchOptions $sc.LaunchOptions `
-            -AppendArgsToExecutable $false `
-            -Template $templateObj
-
-        $cov = if ($entry.Contains('cover')) { [string]$entry['cover'] } else { "" }
-        $item = [SrmManifestItem]::new($entry['title'], $entry['target'], $entry['startIn'], $entry['launchOptions'], [bool]$entry['appendArgsToExecutable'], $cov)
-        $itemsCollection.Add($item)
-        $parsedCount++
+    $onProgress = {
+        param($curr, $tot, $file, $status)
+        $window.Dispatcher.Invoke([Action]{
+            $pct = if ($tot -gt 0) { [int](($curr / $tot) * 100) } else { 0 }
+            $pbScan.Value = $pct
+            $lblProgress.Text = "$status ($curr/$tot)"
+        })
     }
 
-    Update-ItemCount
-    Update-Status "Successfully loaded $parsedCount shortcut(s)."
+    $onLog = {
+        param($lvl, $msg)
+        Write-GuiLog $lvl $msg
+    }
+
+    try {
+        $entries = Invoke-SrmParallelScan `
+            -InputPaths $folderPaths `
+            -Database $script:database `
+            -Template $templateObj `
+            -SkipUnmodified:$skipUnmod `
+            -ThreadCount $threadCount `
+            -OnProgress $onProgress `
+            -OnLog $onLog
+
+        $itemsCollection.Clear()
+        foreach ($e in $entries) {
+            $fol = if ($e.Contains('_SourceDirectory') -and !([string]::IsNullOrWhiteSpace($e['_SourceDirectory']))) { Split-Path $e['_SourceDirectory'] -Leaf } else { "" }
+            $cov = if ($e.Contains('cover')) { [string]$e['cover'] } else { "" }
+            $hash = if ($e.Contains('_ItemHash')) { [string]$e['_ItemHash'] } else { "" }
+            $srcDir = if ($e.Contains('_SourceDirectory')) { [string]$e['_SourceDirectory'] } else { "" }
+            $aa = if ($e.Contains('appendArgsToExecutable')) { [bool]$e['appendArgsToExecutable'] } else { $false }
+
+            $item = [SrmManifestItem]::new($fol, [string]$e['title'], [string]$e['target'], [string]$e['startIn'], [string]$e['launchOptions'], $aa, $cov, $hash, $srcDir)
+            $itemsCollection.Add($item)
+        }
+
+        # Save database cache & update settings
+        Save-SrmDatabase -Database $script:database
+        Write-GuiLog "SUCCESS" "Database updated with $($script:database.Shortcuts.Count) total shortcut record(s)."
+
+        $recentList = @($folderPaths) + @($script:settings.RecentInputFolders | Where-Object { $folderPaths -notcontains $_ })
+        $script:settings.RecentInputFolders = @($recentList | Select-Object -First 15)
+        $script:settings.LastOutputPath     = $txtOutputPath.Text
+        $script:settings.LastOutputMode     = switch ($cmbOutputMode.SelectedIndex) { 1 { 'PerGame' }; 2 { 'Merged' }; default { 'PerFolder' } }
+        $script:settings.SkipUnmodified     = $skipUnmod
+        Save-SrmSettings -Settings $script:settings
+
+        Update-ItemCount
+        $pbScan.Value = 100
+        $lblProgress.Text = "Ready ($($itemsCollection.Count) games)"
+        Update-Status "Scan completed. Loaded $($itemsCollection.Count) game(s)."
+    }
+    catch {
+        Write-GuiLog "ERROR" "Scan failed: $_"
+        [System.Windows.MessageBox]::Show("Error during scan: $_", "Scan Error", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+    }
+    finally {
+        $btnScan.IsEnabled = $true
+        $btnExport.IsEnabled = $true
+    }
 })
 
 # Load Existing Manifest JSON
@@ -706,22 +922,25 @@ $btnLoadJson.Add_Click({
         foreach ($e in $entries) {
             $cov = if ($e.Contains('cover')) { [string]$e['cover'] } else { "" }
             $aa = if ($e.Contains('appendArgsToExecutable')) { [bool]$e['appendArgsToExecutable'] } else { $false }
-            $item = [SrmManifestItem]::new([string]$e['title'], [string]$e['target'], [string]$e['startIn'], [string]$e['launchOptions'], $aa, $cov)
+            $hash = Get-SrmItemHash -Target ([string]$e['target']) -StartIn ([string]$e['startIn'])
+
+            $item = [SrmManifestItem]::new("Imported", [string]$e['title'], [string]$e['target'], [string]$e['startIn'], [string]$e['launchOptions'], $aa, $cov, $hash, (Split-Path $jsonFile -Parent))
             $itemsCollection.Add($item)
         }
 
-        $txtInputPath.Text = $jsonFile
         $txtOutputPath.Text = Split-Path $jsonFile -Parent
         $txtOutputFile.Text = Split-Path $jsonFile -Leaf
+        $cmbOutputMode.SelectedIndex = 2 # Single Merged
 
         Update-ItemCount
-        Update-Status "Loaded $($entries.Count) entry/entries from $jsonFile."
+        Write-GuiLog "SUCCESS" "Imported $($entries.Count) entry/entries from $jsonFile"
+        Update-Status "Loaded $($entries.Count) entries from $jsonFile."
     }
 })
 
 # Add Row
 $btnAddRow.Add_Click({
-    $newItem = [SrmManifestItem]::new("New Game", "C:\Path\to\game.exe", "C:\Path\to", "", $false, "")
+    $newItem = [SrmManifestItem]::new("Custom", "New Game", "C:\Path\to\game.exe", "C:\Path\to", "", $false, "", "", "")
     $itemsCollection.Add($newItem)
     Update-ItemCount
     $gridEntries.ScrollIntoView($newItem)
@@ -735,7 +954,7 @@ $btnRemoveRow.Add_Click({
         [void]$itemsCollection.Remove($item)
     }
     Update-ItemCount
-    Update-Status "Removed $($selected.Count) game(s)."
+    Write-GuiLog "INFO" "Removed $($selected.Count) game(s) from table."
 })
 
 # Clear All
@@ -744,7 +963,7 @@ $btnClearAll.Add_Click({
         if ([System.Windows.MessageBox]::Show("Clear all loaded entries from the table?", "Confirm Clear", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question) -eq [System.Windows.MessageBoxResult]::Yes) {
             $itemsCollection.Clear()
             Update-ItemCount
-            Update-Status "Cleared all entries."
+            Write-GuiLog "INFO" "Cleared table."
         }
     }
 })
@@ -762,6 +981,9 @@ function Get-CurrentManifestEntries {
         if (![string]::IsNullOrWhiteSpace($item.Cover)) {
             $entry['cover'] = $item.Cover
         }
+        if (![string]::IsNullOrWhiteSpace($item.SourceDirectory)) {
+            $entry['_SourceDirectory'] = $item.SourceDirectory
+        }
         $list += $entry
     }
     return ,$list
@@ -775,25 +997,25 @@ $btnWhatIf.Add_Click({
     }
 
     $outDir = $txtOutputPath.Text.Trim()
-    if ([string]::IsNullOrWhiteSpace($outDir)) {
-        $outDir = (Get-Location).Path
+    if ([string]::IsNullOrWhiteSpace($outDir)) { $outDir = (Get-Location).Path }
+    $mode = switch ($cmbOutputMode.SelectedIndex) { 1 { 'PerGame' }; 2 { 'Merged' }; default { 'PerFolder' } }
+
+    $msg = "Simulation (WhatIf):`n`nTotal Games in table: $($itemsCollection.Count)`nOutput Mode: $mode`nDestination Directory: $outDir`n`n"
+    if ($mode -eq 'PerFolder') {
+        $groups = $itemsCollection | Group-Object -Property Folder
+        $msg += "Will generate $($groups.Count) collated manifest file(s):`n"
+        foreach ($g in $groups) {
+            $msg += "  - $($g.Name).manifest.json ($($g.Count) games)`n"
+        }
+    } elseif ($mode -eq 'PerGame') {
+        $msg += "Will generate $($itemsCollection.Count) individual manifest file(s) (one per game)."
+    } else {
+        $outFile = if (![string]::IsNullOrWhiteSpace($txtOutputFile.Text)) { $txtOutputFile.Text } else { "manifest.json" }
+        $msg += "Will generate single merged manifest: $(Join-Path $outDir $outFile)"
     }
 
-    $isIndividual = ($cmbOutputMode.SelectedIndex -eq 1)
-    if ($isIndividual) {
-        $msg = "Simulation (WhatIf):`n`nWill write $($itemsCollection.Count) individual manifest file(s) into:`n$outDir"
-        [System.Windows.MessageBox]::Show($msg, "WhatIf Simulation", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
-    } else {
-        $outFile = $txtOutputFile.Text.Trim()
-        if ([string]::IsNullOrWhiteSpace($outFile)) {
-            $inPath = $txtInputPath.Text.Trim()
-            $outFile = if (![string]::IsNullOrWhiteSpace($inPath)) { Get-SrmDefaultManifestFileName -Path $inPath } else { "manifest.json" }
-        }
-        $fullPath = Join-Path $outDir $outFile
-        $action = if ($chkAppend.IsChecked) { "Append entries to" } else { "Write/Overwrite" }
-        $msg = "Simulation (WhatIf):`n`nAction: $action`nTarget Path: $fullPath`nTotal Games in table: $($itemsCollection.Count)"
-        [System.Windows.MessageBox]::Show($msg, "WhatIf Simulation", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
-    }
+    [System.Windows.MessageBox]::Show($msg, "WhatIf Simulation", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
+    Write-GuiLog "INFO" "Ran WhatIf simulation for $mode mode."
 })
 
 # Export Manifest
@@ -819,53 +1041,78 @@ $btnExport.Add_Click({
     }
 
     $entries = Get-CurrentManifestEntries
-    $isIndividual = ($cmbOutputMode.SelectedIndex -eq 1)
+    $outputMode = switch ($cmbOutputMode.SelectedIndex) { 1 { 'PerGame' }; 2 { 'Merged' }; default { 'PerFolder' } }
     $append = [bool]$chkAppend.IsChecked
     $force = [bool]$chkForce.IsChecked
 
+    $targetPath = if ($outputMode -eq 'Merged') {
+        $fName = if (![string]::IsNullOrWhiteSpace($txtOutputFile.Text)) { $txtOutputFile.Text } else { "manifest.json" }
+        Join-Path $outDir $fName
+    } else {
+        $outDir
+    }
+
     try {
-        if ($isIndividual) {
-            Export-SrmManifest -Manifests $entries -Path $outDir -OutputMode "Individual" -Append:$append -Force:$force
-            Update-Status "Successfully generated $($entries.Count) individual manifest(s) in $outDir"
-            
-            $res = [System.Windows.MessageBox]::Show("Generated $($entries.Count) individual manifest(s) in:`n$outDir`n`nOpen folder in File Explorer?", "Export Successful", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
-            if ($res -eq [System.Windows.MessageBoxResult]::Yes) {
-                Start-Process "explorer.exe" $outDir
-            }
-        }
-        else {
-            $outFile = $txtOutputFile.Text.Trim()
-            if ([string]::IsNullOrWhiteSpace($outFile)) {
-                $inPath = $txtInputPath.Text.Trim()
-                $outFile = if (![string]::IsNullOrWhiteSpace($inPath)) { Get-SrmDefaultManifestFileName -Path $inPath } else { "manifest.json" }
-            }
-            $targetPath = Join-Path $outDir $outFile
+        Write-GuiLog "INFO" "Exporting $($entries.Count) entries in $outputMode mode to: $targetPath"
+        $writtenFiles = Export-SrmManifest `
+            -Manifests $entries `
+            -Path $targetPath `
+            -OutputMode $outputMode `
+            -Append:$append `
+            -Force:$force `
+            -PassThru:$true
 
-            Export-SrmManifest -Manifests $entries -Path $targetPath -OutputMode "Merged" -Append:$append -Force:$force
-            Update-Status "Successfully generated manifest: $targetPath"
+        Write-GuiLog "SUCCESS" "Successfully exported $($writtenFiles.Count) manifest file(s)."
+        Update-Status "Export completed successfully. ($($writtenFiles.Count) files created/updated)"
 
-            $res = [System.Windows.MessageBox]::Show("Manifest saved successfully!`n`nFile: $targetPath`n`nOpen folder in File Explorer?", "Export Successful", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
-            if ($res -eq [System.Windows.MessageBoxResult]::Yes) {
-                Start-Process "explorer.exe" ("/select,`"$targetPath`"")
-            }
+        $res = [System.Windows.MessageBox]::Show("Manifest export completed successfully!`n`nGenerated $($writtenFiles.Count) file(s) in:`n$outDir`n`nOpen folder in File Explorer?", "Export Successful", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
+        if ($res -eq [System.Windows.MessageBoxResult]::Yes) {
+            Start-Process "explorer.exe" $outDir
         }
     }
     catch {
+        Write-GuiLog "ERROR" "Export failed: $_"
         [System.Windows.MessageBox]::Show("Error exporting manifest: $_", "Export Error", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
         Update-Status "Error: $_"
     }
 })
 
-# Auto-populate if default TEST folder exists
+# Load settings & populate UI on startup
+if ($script:settings.RecentInputFolders) {
+    foreach ($rf in $script:settings.RecentInputFolders) {
+        if (![string]::IsNullOrWhiteSpace($rf) -and (Test-Path $rf)) {
+            [void]$cmbRecentFolders.Items.Add($rf)
+        }
+    }
+}
+
+if (![string]::IsNullOrWhiteSpace($script:settings.LastOutputPath) -and (Test-Path $script:settings.LastOutputPath)) {
+    $txtOutputPath.Text = $script:settings.LastOutputPath
+}
+
+if ($script:settings.LastOutputMode) {
+    switch ($script:settings.LastOutputMode) {
+        'PerGame'   { $cmbOutputMode.SelectedIndex = 1 }
+        'Merged'    { $cmbOutputMode.SelectedIndex = 2 }
+        default     { $cmbOutputMode.SelectedIndex = 0 }
+    }
+}
+
+$chkSkipUnmodified.IsChecked = [bool]$script:settings.SkipUnmodified
+
+# Pre-populate TEST folder if present
 $defaultTestDir = Join-Path $PSScriptRoot "TEST"
 if (Test-Path $defaultTestDir) {
-    $txtInputPath.Text = $defaultTestDir
-    $txtOutputPath.Text = $defaultTestDir
-    $txtOutputFile.Text = Get-SrmDefaultManifestFileName -Path $defaultTestDir
+    [void]$lstFolders.Items.Add($defaultTestDir)
+    if ([string]::IsNullOrWhiteSpace($txtOutputPath.Text)) {
+        $txtOutputPath.Text = $defaultTestDir
+    }
 }
 
 # Apply default Auto (System) theme on startup
 Apply-Theme "Auto"
+
+Write-GuiLog "INFO" "SRM Generator GUI initialized. Database contains $($script:database.Shortcuts.Count) cached shortcut(s)."
 
 # Show window
 $window.ShowDialog() | Out-Null

@@ -1,6 +1,36 @@
 #
 # srmgen.psm1 - Steam ROM Manager Manifest Generator Module
+# Enhanced with Multi-Threading, Hash Caching Database, and Recent Settings
 #
+
+function Get-SrmItemHash {
+    <#
+    .SYNOPSIS
+    Computes a deterministic SHA256 hash of a shortcut's target executable and working directory.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Target,
+
+        [Parameter(Mandatory = $false)]
+        [string]$StartIn = ''
+    )
+
+    $cleanTarget = if ($Target) { $Target.Trim().ToLowerInvariant() } else { '' }
+    $cleanStartIn = if ($StartIn) { $StartIn.Trim().ToLowerInvariant() } else { '' }
+    $composite = "$cleanTarget|$cleanStartIn"
+
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($composite)
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $hasher.ComputeHash($bytes)
+        return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $hasher.Dispose()
+    }
+}
 
 function Get-SrmTargetKey {
     <#
@@ -45,6 +75,189 @@ function Get-SrmDefaultManifestFileName {
     }
 
     return "${drive}_${folderName}.manifest.json"
+}
+
+function Get-SrmDatabase {
+    <#
+    .SYNOPSIS
+    Loads or initializes the shortcut manifest database from disk.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$DatabasePath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($DatabasePath)) {
+        $DatabasePath = Join-Path $PSScriptRoot ".srm_database.json"
+    }
+
+    if (Test-Path $DatabasePath -PathType Leaf) {
+        try {
+            $raw = Get-Content -Path $DatabasePath -Raw -ErrorAction Stop
+            if (![string]::IsNullOrWhiteSpace($raw)) {
+                $db = $raw | ConvertFrom-Json
+                $lookup = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                if ($db.shortcuts) {
+                    foreach ($prop in $db.shortcuts.PSObject.Properties) {
+                        $lookup[$prop.Name] = $prop.Value
+                    }
+                }
+                return [pscustomobject]@{
+                    Version   = [string]$db.version
+                    UpdatedAt = [string]$db.updatedAt
+                    Shortcuts = $lookup
+                    FilePath  = (Resolve-Path $DatabasePath).Path
+                }
+            }
+        } catch {
+            Write-Warning "Could not read database at '$DatabasePath': $_. Initializing fresh database."
+        }
+    }
+
+    return [pscustomobject]@{
+        Version   = "1.0"
+        UpdatedAt = (Get-Date).ToString("o")
+        Shortcuts = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        FilePath  = $DatabasePath
+    }
+}
+
+function Save-SrmDatabase {
+    <#
+    .SYNOPSIS
+    Persists the shortcut manifest database to disk as formatted JSON.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Database,
+
+        [Parameter(Mandatory = $false)]
+        [string]$DatabasePath
+    )
+
+    $targetPath = if (![string]::IsNullOrWhiteSpace($DatabasePath)) { $DatabasePath } else { $Database.FilePath }
+    if ([string]::IsNullOrWhiteSpace($targetPath)) {
+        $targetPath = Join-Path $PSScriptRoot ".srm_database.json"
+    }
+
+    $shortcutsDict = [ordered]@{}
+    if ($Database.Shortcuts) {
+        foreach ($k in $Database.Shortcuts.Keys) {
+            $shortcutsDict[$k] = $Database.Shortcuts[$k]
+        }
+    }
+
+    $exportObj = [ordered]@{
+        version    = if ($Database.Version) { $Database.Version } else { "1.0" }
+        updatedAt  = (Get-Date).ToString("o")
+        totalCount = $shortcutsDict.Count
+        shortcuts  = $shortcutsDict
+    }
+
+    if ($PSCmdlet.ShouldProcess($targetPath, "Save shortcut database")) {
+        $dir = Split-Path $targetPath -Parent
+        if (![string]::IsNullOrWhiteSpace($dir) -and !(Test-Path $dir)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
+        $exportObj | ConvertTo-Json -Depth 10 | Set-Content -Path $targetPath -Encoding UTF8
+    }
+}
+
+function Get-SrmSettings {
+    <#
+    .SYNOPSIS
+    Loads recent application settings and folder history from disk.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$SettingsPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SettingsPath)) {
+        $SettingsPath = Join-Path $PSScriptRoot ".srm_settings.json"
+    }
+
+    if (Test-Path $SettingsPath -PathType Leaf) {
+        try {
+            $raw = Get-Content -Path $SettingsPath -Raw -ErrorAction Stop
+            if (![string]::IsNullOrWhiteSpace($raw)) {
+                $obj = $raw | ConvertFrom-Json
+                $mode = if ($obj.lastOutputMode) { [string]$obj.lastOutputMode } else { "PerFolder" }
+                $tpl  = if ($obj.lastTemplate) { [string]$obj.lastTemplate } else { "default" }
+                $thm  = if ($obj.lastTheme) { [string]$obj.lastTheme } else { "Auto" }
+                $tc   = if ($obj.threadCount -and [int]$obj.threadCount -gt 0) { [int]$obj.threadCount } else { [System.Environment]::ProcessorCount }
+
+                return [pscustomobject]@{
+                    RecentInputFolders = [string[]]($obj.recentInputFolders)
+                    LastOutputPath     = [string]($obj.lastOutputPath)
+                    LastOutputFile     = [string]($obj.lastOutputFile)
+                    LastOutputMode     = $mode
+                    LastTemplate       = $tpl
+                    LastTheme          = $thm
+                    SkipUnmodified     = [bool]($obj.skipUnmodified)
+                    ThreadCount        = $tc
+                    FilePath           = (Resolve-Path $SettingsPath).Path
+                }
+            }
+        } catch {
+            Write-Warning "Could not read settings at '$SettingsPath': $_."
+        }
+    }
+
+    return [pscustomobject]@{
+        RecentInputFolders = @()
+        LastOutputPath     = ""
+        LastOutputFile     = ""
+        LastOutputMode     = "PerFolder"
+        LastTemplate       = "default"
+        LastTheme          = "Auto"
+        SkipUnmodified     = $false
+        ThreadCount        = [System.Environment]::ProcessorCount
+        FilePath           = $SettingsPath
+    }
+}
+
+function Save-SrmSettings {
+    <#
+    .SYNOPSIS
+    Saves application settings and recent folder history to disk.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Settings,
+
+        [Parameter(Mandatory = $false)]
+        [string]$SettingsPath
+    )
+
+    $targetPath = if (![string]::IsNullOrWhiteSpace($SettingsPath)) { $SettingsPath } else { $Settings.FilePath }
+    if ([string]::IsNullOrWhiteSpace($targetPath)) {
+        $targetPath = Join-Path $PSScriptRoot ".srm_settings.json"
+    }
+
+    $exportObj = [ordered]@{
+        recentInputFolders = @($Settings.RecentInputFolders | Select-Object -Unique | Select-Object -First 15)
+        lastOutputPath     = [string]$Settings.LastOutputPath
+        lastOutputFile     = [string]$Settings.LastOutputFile
+        lastOutputMode     = [string]$Settings.LastOutputMode
+        lastTemplate       = [string]$Settings.LastTemplate
+        lastTheme          = [string]$Settings.LastTheme
+        skipUnmodified     = [bool]$Settings.SkipUnmodified
+        threadCount        = [int]$Settings.ThreadCount
+        updatedAt          = (Get-Date).ToString("o")
+    }
+
+    if ($PSCmdlet.ShouldProcess($targetPath, "Save application settings")) {
+        $dir = Split-Path $targetPath -Parent
+        if (![string]::IsNullOrWhiteSpace($dir) -and !(Test-Path $dir)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
+        $exportObj | ConvertTo-Json -Depth 5 | Set-Content -Path $targetPath -Encoding UTF8
+    }
 }
 
 function Get-SrmTemplate {
@@ -191,48 +404,337 @@ function New-SrmManifestEntry {
         [bool]$AppendArgsToExecutable = $false,
 
         [Parameter(Mandatory = $false)]
-        [object]$Template
+        [object]$Template,
+
+        [Parameter(Mandatory = $false)]
+        [string]$SourceDirectory = '',
+
+        [Parameter(Mandatory = $false)]
+        [string]$ItemHash = ''
     )
 
-    if ($null -eq $Template) {
-        return [ordered]@{
-            title                  = $Title
-            target                 = $Target
-            startIn                = $StartIn
-            launchOptions          = $LaunchOptions
-            appendArgsToExecutable = $AppendArgsToExecutable
-        }
-    }
-
     $entry = [ordered]@{}
-    $props = if ($Template -is [System.Management.Automation.PSCustomObject]) {
-        $Template.PSObject.Properties
-    } else {
-        $Template.GetEnumerator()
-    }
 
-    foreach ($prop in $props) {
-        $val = $prop.Value
-        if ($val -is [string]) {
-            $replaced = $val
-            $replaced = $replaced -replace '\{\{\s*title\s*\}\}|\$\{title\}', $Title
-            $replaced = $replaced -replace '\{\{\s*target\s*\}\}|\$\{target\}', $Target
-            $replaced = $replaced -replace '\{\{\s*startIn\s*\}\}|\$\{startIn\}', $StartIn
-            $replaced = $replaced -replace '\{\{\s*launchOptions\s*\}\}|\$\{launchOptions\}', $LaunchOptions
-            $entry[$prop.Name] = $replaced
+    if ($null -eq $Template) {
+        $entry['title']                  = $Title
+        $entry['target']                 = $Target
+        $entry['startIn']                = $StartIn
+        $entry['launchOptions']          = $LaunchOptions
+        $entry['appendArgsToExecutable'] = $AppendArgsToExecutable
+    }
+    else {
+        $props = if ($Template -is [System.Management.Automation.PSCustomObject]) {
+            $Template.PSObject.Properties
         } else {
-            $entry[$prop.Name] = $val
+            $Template.GetEnumerator()
         }
+
+        foreach ($prop in $props) {
+            $val = $prop.Value
+            if ($val -is [string]) {
+                $replaced = $val
+                $replaced = $replaced -replace '\{\{\s*title\s*\}\}|\$\{title\}', $Title
+                $replaced = $replaced -replace '\{\{\s*target\s*\}\}|\$\{target\}', $Target
+                $replaced = $replaced -replace '\{\{\s*startIn\s*\}\}|\$\{startIn\}', $StartIn
+                $replaced = $replaced -replace '\{\{\s*launchOptions\s*\}\}|\$\{launchOptions\}', $LaunchOptions
+                $entry[$prop.Name] = $replaced
+            } else {
+                $entry[$prop.Name] = $val
+            }
+        }
+
+        if (-not $entry.Contains('title')) { $entry['title'] = $Title }
+        if (-not $entry.Contains('target')) { $entry['target'] = $Target }
+        if (-not $entry.Contains('startIn')) { $entry['startIn'] = $StartIn }
+        if (-not $entry.Contains('launchOptions')) { $entry['launchOptions'] = $LaunchOptions }
+        if (-not $entry.Contains('appendArgsToExecutable')) { $entry['appendArgsToExecutable'] = $AppendArgsToExecutable }
     }
 
-    # Ensure essential SRM keys exist
-    if (-not $entry.Contains('title')) { $entry['title'] = $Title }
-    if (-not $entry.Contains('target')) { $entry['target'] = $Target }
-    if (-not $entry.Contains('startIn')) { $entry['startIn'] = $StartIn }
-    if (-not $entry.Contains('launchOptions')) { $entry['launchOptions'] = $LaunchOptions }
-    if (-not $entry.Contains('appendArgsToExecutable')) { $entry['appendArgsToExecutable'] = $AppendArgsToExecutable }
+    # Attach internal metadata (stripped upon final export)
+    if (![string]::IsNullOrWhiteSpace($SourceDirectory)) {
+        $entry['_SourceDirectory'] = $SourceDirectory
+    }
+    if (![string]::IsNullOrWhiteSpace($ItemHash)) {
+        $entry['_ItemHash'] = $ItemHash
+    }
 
     return $entry
+}
+
+function Invoke-SrmParallelScan {
+    <#
+    .SYNOPSIS
+    Scans multiple directories or shortcut files in parallel, utilizing database caching and hashing.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string[]]$InputPaths,
+
+        [Parameter(Mandatory = $false)]
+        [object]$Database,
+
+        [Parameter(Mandatory = $false)]
+        [object]$Template,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$SkipUnmodified,
+
+        [Parameter(Mandatory = $false)]
+        [int]$ThreadCount = 4,
+
+        [Parameter(Mandatory = $false)]
+        [scriptblock]$OnProgress,
+
+        [Parameter(Mandatory = $false)]
+        [scriptblock]$OnLog
+    )
+
+    function Write-ScanLog([string]$level, [string]$msg) {
+        if ($OnLog) {
+            try { $OnLog.Invoke($level, $msg) } catch {}
+        } else {
+            $color = switch ($level) {
+                'ERROR'   { 'Red' }
+                'WARN'    { 'Yellow' }
+                'SUCCESS' { 'Green' }
+                'CACHE'   { 'DarkCyan' }
+                'SCAN'    { 'Cyan' }
+                default   { 'Gray' }
+            }
+            Write-Host "[$level] $msg" -ForegroundColor $color
+        }
+    }
+
+    # Resolve all shortcut files from all input paths
+    $files = @()
+    foreach ($path in $InputPaths) {
+        if ([string]::IsNullOrWhiteSpace($path)) { continue }
+        if (!(Test-Path $path)) {
+            Write-ScanLog 'WARN' "Path does not exist: $path"
+            continue
+        }
+        $resolved = (Resolve-Path $path).Path
+        if (Test-Path $resolved -PathType Leaf) {
+            if ($resolved -match '\.lnk$') {
+                $files += Get-Item $resolved
+            } else {
+                Write-ScanLog 'WARN' "Skipping non-shortcut file: $resolved"
+            }
+        } else {
+            $found = @(Get-ChildItem -Path $resolved -Filter "*.lnk" -File)
+            Write-ScanLog 'INFO' "Found $($found.Count) shortcut(s) in: $resolved"
+            $files += $found
+        }
+    }
+
+    if ($files.Count -eq 0) {
+        Write-ScanLog 'WARN' "No .lnk shortcut files found in specified paths."
+        return @()
+    }
+
+    $total = $files.Count
+    $results = @()
+    $filesToParse = @()
+    $cachedCount = 0
+    $skippedCount = 0
+
+    # 1. Fast cache check against database
+    foreach ($file in $files) {
+        $fullPath = $file.FullName
+        $lastWrite = $file.LastWriteTimeUtc.ToString("o")
+        $len = $file.Length
+        $srcDir = $file.DirectoryName
+
+        $isCachedAndUnmodified = $false
+        $cachedRecord = $null
+
+        if ($null -ne $Database -and $Database.Shortcuts -and $Database.Shortcuts.ContainsKey($fullPath)) {
+            $rec = $Database.Shortcuts[$fullPath]
+            if ($rec.fileLastWriteTimeUtc -eq $lastWrite -and $rec.fileLength -eq $len) {
+                $isCachedAndUnmodified = $true
+                $cachedRecord = $rec
+            }
+        }
+
+        if ($isCachedAndUnmodified) {
+            $hash = if ($cachedRecord.itemHash) { $cachedRecord.itemHash } else { Get-SrmItemHash -Target $cachedRecord.target -StartIn $cachedRecord.startIn }
+            
+            if ($SkipUnmodified) {
+                $skippedCount++
+                Write-ScanLog 'CACHE' "Unmodified shortcut skipped: $($file.Name) (hash: $($hash.Substring(0, 8))...)"
+                continue
+            }
+
+            $cachedCount++
+            Write-ScanLog 'CACHE' "Loaded from cache: $($file.Name) (hash: $($hash.Substring(0, 8))...)"
+            
+            $entry = New-SrmManifestEntry `
+                -Title $cachedRecord.title `
+                -Target $cachedRecord.target `
+                -StartIn $cachedRecord.startIn `
+                -LaunchOptions $cachedRecord.launchOptions `
+                -AppendArgsToExecutable ([bool]$cachedRecord.appendArgsToExecutable) `
+                -Template $Template `
+                -SourceDirectory $srcDir `
+                -ItemHash $hash
+
+            $results += $entry
+        } else {
+            $filesToParse += $file
+        }
+    }
+
+    Write-ScanLog 'INFO' "Cache evaluation: $cachedCount cached, $skippedCount skipped, $($filesToParse.Count) to parse."
+
+    # 2. Parse new / modified files (Threaded)
+    if ($filesToParse.Count -gt 0) {
+        $effectiveThreads = [Math]::Max(1, [Math]::Min($ThreadCount, $filesToParse.Count))
+        Write-ScanLog 'INFO' "Parsing $($filesToParse.Count) shortcut(s) using $effectiveThreads worker thread(s)..."
+
+        if ($effectiveThreads -eq 1 -or $filesToParse.Count -eq 1) {
+            # Single-threaded fallback
+            $idx = 0
+            foreach ($file in $filesToParse) {
+                $idx++
+                if ($OnProgress) {
+                    try { $OnProgress.Invoke($idx, $filesToParse.Count, $file.Name, "Parsing: $($file.Name)") } catch {}
+                }
+                $shortcutInfo = ConvertFrom-LnkShortcut -Path $file.FullName
+                if ($null -eq $shortcutInfo) {
+                    Write-ScanLog 'ERROR' "Failed to parse shortcut: $($file.FullName)"
+                    continue
+                }
+
+                $hash = Get-SrmItemHash -Target $shortcutInfo.Target -StartIn $shortcutInfo.StartIn
+
+                # Update database
+                if ($null -ne $Database) {
+                    $Database.Shortcuts[$file.FullName] = [pscustomobject]@{
+                        shortcutPath           = $file.FullName
+                        fileLastWriteTimeUtc   = $file.LastWriteTimeUtc.ToString("o")
+                        fileLength             = $file.Length
+                        title                  = $shortcutInfo.Title
+                        target                 = $shortcutInfo.Target
+                        startIn                = $shortcutInfo.StartIn
+                        launchOptions          = $shortcutInfo.LaunchOptions
+                        appendArgsToExecutable = $false
+                        itemHash               = $hash
+                        scannedAt              = (Get-Date).ToString("o")
+                    }
+                }
+
+                Write-ScanLog 'SCAN' "Parsed: $($file.Name) -> Target: $($shortcutInfo.Target) (hash: $($hash.Substring(0, 8))...)"
+
+                $entry = New-SrmManifestEntry `
+                    -Title $shortcutInfo.Title `
+                    -Target $shortcutInfo.Target `
+                    -StartIn $shortcutInfo.StartIn `
+                    -LaunchOptions $shortcutInfo.LaunchOptions `
+                    -AppendArgsToExecutable $false `
+                    -Template $Template `
+                    -SourceDirectory $file.DirectoryName `
+                    -ItemHash $hash
+
+                $results += $entry
+            }
+        }
+        else {
+            # Multi-threaded using RunspacePool with STA
+            $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $effectiveThreads)
+            $pool.ApartmentState = [System.Threading.ApartmentState]::STA
+            $pool.Open()
+
+            $jobs = @()
+            foreach ($file in $filesToParse) {
+                $ps = [System.Management.Automation.PowerShell]::Create().AddScript({
+                    param($filePath, $baseName)
+                    $wsh = New-Object -ComObject WScript.Shell
+                    try {
+                        $sc = $wsh.CreateShortcut($filePath)
+                        $cleanTitle = $baseName -replace '\s*-?\s*Shortcut\s*$', ''
+                        $cleanTitle = $cleanTitle -replace '\.[^.]+$', ''
+                        return [pscustomobject]@{
+                            Success       = $true
+                            Path          = $filePath
+                            Title         = $cleanTitle
+                            Target        = [string]$sc.TargetPath
+                            StartIn       = [string]$sc.WorkingDirectory
+                            LaunchOptions = [string]$sc.Arguments
+                        }
+                    } catch {
+                        return [pscustomobject]@{
+                            Success = $false
+                            Path    = $filePath
+                            Error   = $_.ToString()
+                        }
+                    } finally {
+                        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wsh) | Out-Null
+                    }
+                }).AddArgument($file.FullName).AddArgument($file.BaseName)
+
+                $ps.RunspacePool = $pool
+                $jobs += [pscustomobject]@{
+                    PowerShell = $ps
+                    Handle     = $ps.BeginInvoke()
+                    File       = $file
+                }
+            }
+
+            $completed = 0
+            foreach ($job in $jobs) {
+                $completed++
+                $file = $job.File
+                if ($OnProgress) {
+                    try { $OnProgress.Invoke($completed, $jobs.Count, $file.Name, "Processed ($completed of $($jobs.Count))") } catch {}
+                }
+
+                $parseResult = $job.PowerShell.EndInvoke($job.Handle)
+                $job.PowerShell.Dispose()
+
+                if ($parseResult -and $parseResult.Success) {
+                    $hash = Get-SrmItemHash -Target $parseResult.Target -StartIn $parseResult.StartIn
+
+                    if ($null -ne $Database) {
+                        $Database.Shortcuts[$file.FullName] = [pscustomobject]@{
+                            shortcutPath           = $file.FullName
+                            fileLastWriteTimeUtc   = $file.LastWriteTimeUtc.ToString("o")
+                            fileLength             = $file.Length
+                            title                  = $parseResult.Title
+                            target                 = $parseResult.Target
+                            startIn                = $parseResult.StartIn
+                            launchOptions          = $parseResult.LaunchOptions
+                            appendArgsToExecutable = $false
+                            itemHash               = $hash
+                            scannedAt              = (Get-Date).ToString("o")
+                        }
+                    }
+
+                    Write-ScanLog 'SCAN' "Parsed: $($file.Name) -> Target: $($parseResult.Target) (hash: $($hash.Substring(0, 8))...)"
+
+                    $entry = New-SrmManifestEntry `
+                        -Title $parseResult.Title `
+                        -Target $parseResult.Target `
+                        -StartIn $parseResult.StartIn `
+                        -LaunchOptions $parseResult.LaunchOptions `
+                        -AppendArgsToExecutable $false `
+                        -Template $Template `
+                        -SourceDirectory $file.DirectoryName `
+                        -ItemHash $hash
+
+                    $results += $entry
+                } else {
+                    Write-ScanLog 'ERROR' "Failed to parse $($file.Name): $($parseResult.Error)"
+                }
+            }
+
+            $pool.Close()
+            $pool.Dispose()
+        }
+    }
+
+    Write-ScanLog 'SUCCESS' "Scan finished: $($results.Count) manifest entries ready."
+    return ,$results
 }
 
 function Import-SrmManifest {
@@ -270,10 +772,32 @@ function Import-SrmManifest {
     return ,$manifests
 }
 
+function Clean-SrmManifestForExport {
+    <#
+    .SYNOPSIS
+    Removes internal module metadata keys (e.g. _SourceDirectory, _ItemHash) prior to JSON serialization.
+    #>
+    param([object]$Entry)
+
+    $clean = [ordered]@{}
+    $props = if ($Entry -is [System.Collections.IDictionary]) {
+        $Entry.Keys
+    } else {
+        $Entry.PSObject.Properties.Name
+    }
+
+    foreach ($k in $props) {
+        if ($k -notmatch '^_') {
+            $clean[$k] = if ($Entry -is [System.Collections.IDictionary]) { $Entry[$k] } else { $Entry.$k }
+        }
+    }
+    return $clean
+}
+
 function Export-SrmManifest {
     <#
     .SYNOPSIS
-    Saves an array of manifest entries as formatted JSON manifest file(s), supporting append, deduplication, and individual file output.
+    Saves an array of manifest entries as formatted JSON manifest file(s), supporting Merged, Individual (PerGame), and PerFolder output modes.
     #>
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
@@ -284,8 +808,8 @@ function Export-SrmManifest {
         [string]$Path,
 
         [Parameter(Mandatory = $false)]
-        [ValidateSet('Merged', 'Individual')]
-        [string]$OutputMode = 'Merged',
+        [ValidateSet('Merged', 'Individual', 'PerFolder', 'PerGame', 'SingleFile')]
+        [string]$OutputMode = 'PerFolder',
 
         [Parameter(Mandatory = $false)]
         [switch]$Append,
@@ -302,15 +826,23 @@ function Export-SrmManifest {
         return
     }
 
-    if ($OutputMode -eq 'Individual') {
-        # Ensure output directory exists
+    # Normalize mode names
+    $normalizedMode = switch ($OutputMode) {
+        'PerGame'    { 'Individual' }
+        'SingleFile' { 'Merged' }
+        default      { $OutputMode }
+    }
+
+    $writtenFiles = @()
+
+    # 1. Individual (Per-Game) mode
+    if ($normalizedMode -eq 'Individual') {
         if (!(Test-Path $Path)) {
             if ($PSCmdlet.ShouldProcess($Path, "Create output directory")) {
                 New-Item -ItemType Directory -Force -Path $Path | Out-Null
             }
         }
 
-        $writtenFiles = @()
         foreach ($entry in $Manifests) {
             $cleanTitle = ([string]$entry.title).Trim()
             $safeTitle = ($cleanTitle -replace '[\\/:*?"<>|]', '_').Trim()
@@ -327,19 +859,57 @@ function Export-SrmManifest {
             }
 
             if ($PSCmdlet.ShouldProcess($individualFilePath, "Write individual manifest")) {
-                ConvertTo-Json -InputObject $entry -Depth 10 | Set-Content -Path $individualFilePath -Encoding UTF8
+                $cleanObj = Clean-SrmManifestForExport -Entry $entry
+                ConvertTo-Json -InputObject $cleanObj -Depth 10 | Set-Content -Path $individualFilePath -Encoding UTF8
                 Write-Host "-> Generated individual manifest: $individualFilePath"
                 $writtenFiles += $individualFilePath
             }
         }
 
-        if ($PassThru) {
-            return ,$writtenFiles
-        }
+        if ($PassThru) { return ,$writtenFiles }
         return
     }
 
-    # Merged output mode
+    # 2. PerFolder mode: collate manifest per source folder
+    if ($normalizedMode -eq 'PerFolder') {
+        if (!(Test-Path $Path)) {
+            if ($PSCmdlet.ShouldProcess($Path, "Create output directory")) {
+                New-Item -ItemType Directory -Force -Path $Path | Out-Null
+            }
+        }
+
+        # Group entries by _SourceDirectory
+        $groups = $Manifests | Group-Object -Property {
+            if ($_.Contains('_SourceDirectory') -and !([string]::IsNullOrWhiteSpace($_['_SourceDirectory']))) {
+                $_['_SourceDirectory']
+            } elseif ($_.PSObject -and $_.PSObject.Properties['_SourceDirectory']) {
+                $_.PSObject.Properties['_SourceDirectory'].Value
+            } else {
+                "General"
+            }
+        }
+
+        foreach ($grp in $groups) {
+            $folderPath = $grp.Name
+            $folderManifestName = if ($folderPath -ne "General" -and (Test-Path $folderPath)) {
+                Get-SrmDefaultManifestFileName -Path $folderPath
+            } else {
+                "collated.manifest.json"
+            }
+
+            $targetManifestPath = Join-Path $Path $folderManifestName
+            $cleanEntries = @($grp.Group | ForEach-Object { Clean-SrmManifestForExport -Entry $_ })
+
+            # Export this folder's collated manifest
+            $res = Export-SrmManifest -Manifests $cleanEntries -Path $targetManifestPath -OutputMode 'Merged' -Append:$Append -Force:$Force -PassThru:$true
+            if ($res) { $writtenFiles += $targetManifestPath }
+        }
+
+        if ($PassThru) { return ,$writtenFiles }
+        return
+    }
+
+    # 3. Merged (Single File) mode
     $outputExists = Test-Path $Path -PathType Leaf
     $finalEntries = @()
     $existingTargets = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -349,7 +919,7 @@ function Export-SrmManifest {
         foreach ($entry in $existingEntries) {
             $key = Get-SrmTargetKey $entry
             if ($null -ne $key) { [void]$existingTargets.Add($key) }
-            $finalEntries += $entry
+            $finalEntries += (Clean-SrmManifestForExport -Entry $entry)
         }
 
         foreach ($newEntry in $Manifests) {
@@ -359,7 +929,7 @@ function Export-SrmManifest {
                 continue
             }
             if ($null -ne $key) { [void]$existingTargets.Add($key) }
-            $finalEntries += $newEntry
+            $finalEntries += (Clean-SrmManifestForExport -Entry $newEntry)
         }
     }
     else {
@@ -373,7 +943,7 @@ function Export-SrmManifest {
                 }
                 [void]$seen.Add($key)
             }
-            $finalEntries += $entry
+            $finalEntries += (Clean-SrmManifestForExport -Entry $entry)
         }
     }
 
@@ -386,10 +956,11 @@ function Export-SrmManifest {
 
         ConvertTo-Json -InputObject @($finalEntries) -Depth 10 | Set-Content -Path $Path -Encoding UTF8
         Write-Host "-> Generated manifest: $Path"
+        $writtenFiles += $Path
     }
 
     if ($PassThru) {
-        return ,$finalEntries
+        return ,$writtenFiles
     }
 }
 
@@ -587,7 +1158,7 @@ function Invoke-SrmWizard {
         $outPath = (Read-Host "Output directory (press Enter to overwrite original file in place)").Trim().Trim('"').Trim("'")
 
         return @{
-            InputPath   = $jsonPath
+            InputPaths  = @($jsonPath)
             OutputPath  = $outPath
             EditMode    = $true
             TUI         = $tui
@@ -598,24 +1169,36 @@ function Invoke-SrmWizard {
     }
 
     Write-Host "`n-- Shortcut Parsing Mode --" -ForegroundColor Yellow
-    $inPath = ""
-    do {
-        $inPath = (Read-Host "Path to folder with .lnk shortcuts (or a single .lnk)").Trim().Trim('"').Trim("'")
-        if (!(Test-Path $inPath)) {
-            Write-Warning "Path '$inPath' does not exist. Please enter a valid path."
-            $inPath = ""
+    $folders = @()
+    while ($true) {
+        $prompt = if ($folders.Count -eq 0) { "Enter path to folder containing .lnk shortcuts (or a single .lnk)" } else { "Add another folder (or press Enter to finish)" }
+        $inPath = (Read-Host $prompt).Trim().Trim('"').Trim("'")
+        if ([string]::IsNullOrWhiteSpace($inPath)) {
+            if ($folders.Count -gt 0) { break }
+            continue
         }
-    } while ([string]::IsNullOrWhiteSpace($inPath))
+        if (!(Test-Path $inPath)) {
+            Write-Warning "Path '$inPath' does not exist."
+            continue
+        }
+        $folders += (Resolve-Path $inPath).Path
+        Write-Host "  -> Added: $inPath" -ForegroundColor Green
+    }
 
-    $defaultOut = if (Test-Path $inPath -PathType Leaf) { Split-Path $inPath } else { $inPath }
+    $defaultOut = if (Test-Path $folders[0] -PathType Leaf) { Split-Path $folders[0] } else { $folders[0] }
     $outDir = (Read-Host "Output directory [default: $defaultOut]").Trim().Trim('"').Trim("'")
     if ([string]::IsNullOrWhiteSpace($outDir)) { $outDir = $defaultOut }
 
     Write-Host "`nOutput Mode:" -ForegroundColor Yellow
-    Write-Host "  [1] Single merged manifest file (recommended for SRM Manual parser)"
-    Write-Host "  [2] Individual manifest files per game"
-    $outModeChoice = (Read-Host "Choice [1/2, default: 1]").Trim()
-    $outMode = if ($outModeChoice -eq "2") { 'Individual' } else { 'Merged' }
+    Write-Host "  [1] Per Folder (collated manifest per input directory)"
+    Write-Host "  [2] Per Game (individual manifest per shortcut)"
+    Write-Host "  [3] Single Merged manifest file (collates all games into one file)"
+    $outModeChoice = (Read-Host "Choice [1/2/3, default: 1]").Trim()
+    $outMode = switch ($outModeChoice) {
+        "2" { 'PerGame' }
+        "3" { 'Merged' }
+        default { 'PerFolder' }
+    }
 
     Write-Host "`nManifest Template:" -ForegroundColor Yellow
     Write-Host "  [1] Standard SRM (title, target, startIn, launchOptions)"
@@ -642,7 +1225,7 @@ function Invoke-SrmWizard {
     Write-Host "Starting generation..." -ForegroundColor Green
 
     return @{
-        InputPath   = $inPath
+        InputPaths  = $folders
         OutputPath  = $outDir
         EditMode    = $false
         OutputMode  = $outMode
@@ -653,11 +1236,17 @@ function Invoke-SrmWizard {
 }
 
 Export-ModuleMember -Function @(
+    'Get-SrmItemHash',
     'Get-SrmTargetKey',
     'Get-SrmDefaultManifestFileName',
+    'Get-SrmDatabase',
+    'Save-SrmDatabase',
+    'Get-SrmSettings',
+    'Save-SrmSettings',
     'Get-SrmTemplate',
     'ConvertFrom-LnkShortcut',
     'New-SrmManifestEntry',
+    'Invoke-SrmParallelScan',
     'Import-SrmManifest',
     'Export-SrmManifest',
     'Read-SrmHostPrefilled',

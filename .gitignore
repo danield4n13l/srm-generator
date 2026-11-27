@@ -4,3 +4,6 @@ TEST
 
 # Files
 *.lnk
+.srm_database.json
+.srm_settings.json
+

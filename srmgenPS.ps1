@@ -1,34 +1,52 @@
 <#
 .NAME
-Steam ROM Manager - External Shortcut importer and generator
+Steam ROM Manager - External Shortcut Importer & Manifest Generator
 .SYNOPSIS
-srmgenPS.ps1 is a PowerShell script that imports and generates external shortcuts for Steam ROM Manager.
+srmgenPS.ps1 is a high-performance, multi-threaded PowerShell script that imports and generates
+external shortcut manifests for Steam ROM Manager (SRM).
 .DESCRIPTION
-This script parses Windows shortcuts (.lnk) and generates JSON manifests for Steam ROM Manager.
+Scans one or multiple directories of Windows shortcuts (.lnk), extracts launch parameters,
+caches shortcut hashes in a database to skip unmodified files on subsequent scans, supports
+templates and recent settings, and exports manifests per folder, per game, or merged into a single file.
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
-    [Parameter(Mandatory = $false, Position = 0, HelpMessage = "Path to a directory containing .lnk files (or a single .lnk file, or .json for EditMode)")]
-    [string]$InputPath,
+    [Alias('InputPath', 'Path', 'Paths', 'p')]
+    [Parameter(Mandatory = $false, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true, HelpMessage = "Path(s) to directory/directories containing .lnk files (or single .lnk, or .json for EditMode)")]
+    [string[]]$InputPaths,
 
-    [Parameter(Mandatory = $false, Position = 1, HelpMessage = "Path to the output directory where the manifest will be saved")]
+    [Alias('o', 'Out')]
+    [Parameter(Mandatory = $false, Position = 1, HelpMessage = "Path to the output directory where manifest file(s) will be saved")]
     [string]$OutputPath,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Custom output filename (overrides default <Drive>_<Folder>.manifest.json)")]
+    [Parameter(Mandatory = $false, HelpMessage = "Custom output filename (used for Merged/SingleFile mode)")]
     [string]$OutputFile,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Output mode: 'Merged' (single JSON manifest) or 'Individual' (separate file per game)")]
-    [ValidateSet('Merged', 'Individual')]
-    [string]$OutputMode = 'Merged',
+    [Alias('Mode', 'm')]
+    [Parameter(Mandatory = $false, HelpMessage = "Output mode: 'PerFolder' (collated per directory), 'PerGame' / 'Individual' (separate file per game), or 'Merged' (single JSON manifest)")]
+    [ValidateSet('PerFolder', 'PerGame', 'Individual', 'Merged', 'SingleFile')]
+    [string]$OutputMode = 'PerFolder',
 
     [Parameter(Mandatory = $false, HelpMessage = "Manifest template to use: 'default', 'artwork', or path to a custom JSON template")]
     [string]$Template = 'default',
 
-    [Parameter(Mandatory = $false, HelpMessage = "Overwrite the output manifest if it already exists")]
+    [Parameter(Mandatory = $false, HelpMessage = "Path to the shortcut manifest database file for hash caching")]
+    [string]$DatabasePath,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Skip shortcuts that are already in the database and have not been modified")]
+    [switch]$SkipUnmodified,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Disable database caching and force fresh re-parse of all shortcuts")]
+    [switch]$NoCache,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Number of worker threads for parallel shortcut scanning")]
+    [int]$Threads = [System.Environment]::ProcessorCount,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Overwrite the output manifest(s) without confirmation prompt")]
     [switch]$Force,
 
     [Alias('a')]
-    [Parameter(Mandatory = $false, HelpMessage = "Append entries to the existing output manifest")]
+    [Parameter(Mandatory = $false, HelpMessage = "Append entries to the existing output manifest(s)")]
     [switch]$Append,
 
     [Alias('i')]
@@ -53,40 +71,52 @@ if (Test-Path $moduleManifestPath) {
 }
 
 # If no arguments provided, launch the interactive setup wizard
-if ([string]::IsNullOrWhiteSpace($InputPath)) {
+if ($null -eq $InputPaths -or $InputPaths.Count -eq 0) {
     if ([Environment]::UserInteractive) {
         $wizard = Invoke-SrmWizard
         if ($null -eq $wizard) {
             Write-Warning "Setup wizard was cancelled."
             return
         }
-        $InputPath   = $wizard.InputPath
-        $OutputPath  = $wizard.OutputPath
-        $EditMode    = $wizard.EditMode
-        $OutputMode  = $wizard.OutputMode
-        $Template    = $wizard.Template
-        $TUI         = $wizard.TUI
-        $Interactive = $wizard.Interactive
+        $InputPaths   = $wizard.InputPaths
+        $OutputPath   = $wizard.OutputPath
+        $EditMode     = $wizard.EditMode
+        $OutputMode   = $wizard.OutputMode
+        $Template     = $wizard.Template
+        $TUI          = $wizard.TUI
+        $Interactive  = $wizard.Interactive
     }
     else {
-        Write-Error "InputPath is required in non-interactive sessions."
+        Write-Error "InputPaths is required in non-interactive sessions."
         return
     }
 }
 
-# Basic validation for InputPath
-if (!(Test-Path $InputPath)) {
-    Write-Error "InputPath does not exist: $InputPath"
+# Load settings and database
+$settings = Get-SrmSettings
+$database = if (-not $NoCache) { Get-SrmDatabase -DatabasePath $DatabasePath } else { $null }
+
+# Resolve input paths
+$resolvedInputPaths = @()
+foreach ($p in $InputPaths) {
+    if ([string]::IsNullOrWhiteSpace($p)) { continue }
+    if (!(Test-Path $p)) {
+        Write-Warning "Input path does not exist: $p"
+        continue
+    }
+    $resolvedInputPaths += (Resolve-Path $p).Path
+}
+
+if ($resolvedInputPaths.Count -eq 0) {
+    Write-Error "No valid input paths specified."
     return
 }
 
-# Resolve absolute paths
-$InputPath = (Resolve-Path $InputPath).Path
-
-# Handle OutputPath validation
+# Handle OutputPath validation / default
 if (-not $EditMode -and [string]::IsNullOrWhiteSpace($OutputPath)) {
-    # Default OutputPath to InputPath directory if not specified
-    $OutputPath = if (Test-Path $InputPath -PathType Leaf) { Split-Path $InputPath } else { $InputPath }
+    $firstInput = $resolvedInputPaths[0]
+    $OutputPath = if (Test-Path $firstInput -PathType Leaf) { Split-Path $firstInput } else { $firstInput }
+    Write-Host "No OutputPath specified; defaulting to: $OutputPath" -ForegroundColor Gray
 }
 
 if (![string]::IsNullOrWhiteSpace($OutputPath)) {
@@ -98,7 +128,7 @@ if (![string]::IsNullOrWhiteSpace($OutputPath)) {
     else {
         $OutputPath = (Resolve-Path $OutputPath).Path
         if (!(Test-Path $OutputPath -PathType Container)) {
-            Write-Error "OutputPath must be a directory."
+            Write-Error "OutputPath must be a directory: $OutputPath"
             return
         }
     }
@@ -110,155 +140,84 @@ if ($Append -and $Force) {
     return
 }
 
-# Load the manifest template
+# Load template definition
 $templateObj = Get-SrmTemplate -Template $Template
 
 $manifests = @()
-$files = @()
 
 if ($EditMode) {
-    if (!(Test-Path $InputPath -PathType Leaf) -or ($InputPath -notmatch '\.json$')) {
-        Write-Error "In Edit mode, InputPath must be an existing .json manifest file."
+    $singleInput = $resolvedInputPaths[0]
+    if (!(Test-Path $singleInput -PathType Leaf) -or ($singleInput -notmatch '\.json$')) {
+        Write-Error "In Edit mode, input must be an existing .json manifest file."
         return
     }
     if (!$Interactive -and !$TUI) {
-        Write-Warning "Edit mode specified but no interactive switch (-i or -t) provided. Copying file instead."
+        Write-Warning "Edit mode specified but no interactive switch (-i or -t) provided. Copying/validating file."
     }
 
-    if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-        $outFilePath = $InputPath
+    $outFilePath = if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+        $singleInput
     } else {
-        $outFileName = Split-Path $InputPath -Leaf
-        $outFilePath = Join-Path $OutputPath $outFileName
+        $leaf = Split-Path $singleInput -Leaf
+        Join-Path $OutputPath $leaf
     }
 
-    $manifests = Import-SrmManifest -Path $InputPath
+    $manifests = Import-SrmManifest -Path $singleInput
 }
 else {
-    # Determine the destination path based on OutputMode and OutputFile
-    if ($OutputMode -eq 'Individual') {
-        $outFilePath = $OutputPath
-    }
-    else {
-        if (![string]::IsNullOrWhiteSpace($OutputFile)) {
-            if ([System.IO.Path]::IsPathRooted($OutputFile)) {
-                $outFilePath = $OutputFile
-            } else {
-                $outFilePath = Join-Path $OutputPath $OutputFile
-            }
-        }
-        else {
-            $outFileName = Get-SrmDefaultManifestFileName -Path $InputPath
-            $outFilePath = Join-Path $OutputPath $outFileName
-        }
-    }
+    # Scan shortcuts across all specified folders in parallel with database hash caching
+    Write-Host "==========================================================" -ForegroundColor Cyan
+    Write-Host " Steam ROM Manager - Shortcut Importer" -ForegroundColor Cyan
+    Write-Host "==========================================================" -ForegroundColor Cyan
+    Write-Host "Source Folders : $($resolvedInputPaths -join ', ')"
+    Write-Host "Output Mode    : $OutputMode"
+    Write-Host "Output Target  : $OutputPath"
+    Write-Host "Threads        : $Threads"
+    Write-Host "Cache Database : $(if ($database) { $database.FilePath } else { 'Disabled' })"
+    Write-Host ""
 
-    # Collect target .lnk files
-    if (Test-Path $InputPath -PathType Leaf) {
-        if ($InputPath -match '\.lnk$') {
-            $files += Get-Item $InputPath
-        }
-        else {
-            Write-Error "Input file must be a .lnk file."
-            return
-        }
-    }
-    elseif (Test-Path $InputPath -PathType Container) {
-        $files = @(Get-ChildItem -Path $InputPath -Filter "*.lnk" -File)
-    }
-
-    if ($files.Count -eq 0) {
-        Write-Warning "No .lnk files found in the input path: $InputPath"
-        return
-    }
-}
-
-# For Merged mode, check if output exists and prompt if needed
-$outputExists = ($OutputMode -eq 'Merged') -and (Test-Path $outFilePath -PathType Leaf)
-if ($outputExists -and -not $Append -and -not $Force) {
-    if ($WhatIfPreference) {
-        Write-Warning "Output file exists. Specify -Append or -Force with -WhatIf to preview the intended action."
-        return
-    }
-
-    do {
-        $outputChoice = (Read-Host "Output file exists. [A]ppend, [O]verwrite, or [C]ancel?").Trim().ToUpperInvariant()
-        switch ($outputChoice) {
-            { $_ -in @('A', 'APPEND') } { $Append = $true }
-            { $_ -in @('O', 'OVERWRITE') } { $Force = $true }
-            { $_ -in @('C', 'CANCEL', '') } { return }
-            default { Write-Warning "Choose A to append, O to overwrite, or C to cancel." }
-        }
-    } while (-not $Append -and -not $Force)
-}
-
-$existingTargets = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-$seenInputTargets = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-
-if ($Append -and $outputExists) {
-    $existingEntries = Import-SrmManifest -Path $outFilePath
-    foreach ($existingManifest in $existingEntries) {
-        $targetKey = Get-SrmTargetKey $existingManifest
-        if ($null -ne $targetKey) { [void]$existingTargets.Add($targetKey) }
-    }
-
-    if ($EditMode) {
-        $manifests = @($manifests | Where-Object {
-            $targetKey = Get-SrmTargetKey $_
-            if ($null -eq $targetKey) { return $true }
-            if ($existingTargets.Contains($targetKey) -or -not $seenInputTargets.Add($targetKey)) {
-                Write-Host "Skipping existing target: $targetKey"
-                return $false
-            }
-            return $true
-        })
-    }
-}
-
-# Process .lnk files if not in Edit mode
-if (-not $EditMode) {
-    $totalFiles = $files.Count
-    $currentIndex = 0
-
-    foreach ($file in $files) {
-        $currentIndex++
-        $pct = [int](($currentIndex / $totalFiles) * 100)
+    $progressCallback = {
+        param($curr, $tot, $file, $status)
         try {
-            Write-Progress -Activity "Generating Steam ROM Manager Manifests" -Status "Processing: $($file.Name)" -PercentComplete $pct
+            $pct = if ($tot -gt 0) { [int](($curr / $tot) * 100) } else { 0 }
+            Write-Progress -Activity "Parsing Shortcuts" -Status "$status ($curr of $tot)" -PercentComplete $pct
         } catch {}
-
-        Write-Host "Parsing: $($file.Name)"
-        $shortcutInfo = ConvertFrom-LnkShortcut -Path $file.FullName
-        if ($null -eq $shortcutInfo) { continue }
-
-        $parsedTarget = $shortcutInfo.Target
-        $cleanTitle = $shortcutInfo.Title
-        $parsedStartIn = $shortcutInfo.StartIn
-        $parsedLaunchOptions = $shortcutInfo.LaunchOptions
-
-        if ($Append -and $outputExists) {
-            $targetKey = ([string]$parsedTarget).Trim()
-            if (![string]::IsNullOrWhiteSpace($targetKey) -and
-                ($existingTargets.Contains($targetKey) -or -not $seenInputTargets.Add($targetKey))) {
-                Write-Host "Skipping existing target: $targetKey"
-                continue
-            }
-        }
-
-        $manifest = New-SrmManifestEntry `
-            -Title $cleanTitle `
-            -Target $parsedTarget `
-            -StartIn $parsedStartIn `
-            -LaunchOptions $parsedLaunchOptions `
-            -AppendArgsToExecutable $false `
-            -Template $templateObj
-
-        $manifests += $manifest
     }
 
-    try {
-        Write-Progress -Activity "Generating Steam ROM Manager Manifests" -Completed
-    } catch {}
+    $manifests = Invoke-SrmParallelScan `
+        -InputPaths $resolvedInputPaths `
+        -Database $database `
+        -Template $templateObj `
+        -SkipUnmodified:$SkipUnmodified `
+        -ThreadCount $Threads `
+        -OnProgress $progressCallback
+
+    try { Write-Progress -Activity "Parsing Shortcuts" -Completed } catch {}
+
+    # Save updated database cache
+    if ($null -ne $database) {
+        Save-SrmDatabase -Database $database
+    }
+
+    # Update recent settings
+    if ($null -ne $settings) {
+        $folderList = @($settings.RecentInputFolders)
+        foreach ($folder in $resolvedInputPaths) {
+            if (Test-Path $folder -PathType Container) {
+                $folderList = @($folder) + @($folderList | Where-Object { $_ -ne $folder })
+            }
+        }
+        $settings.RecentInputFolders = @($folderList | Select-Object -First 15)
+        $settings.LastOutputPath     = $OutputPath
+        $settings.LastOutputMode     = $OutputMode
+        $settings.LastTemplate       = $Template
+        Save-SrmSettings -Settings $settings
+    }
+
+    if ($manifests.Count -eq 0) {
+        Write-Warning "No shortcut entries available to export."
+        return
+    }
 }
 
 # Sequential interactive modification
@@ -272,16 +231,31 @@ if ($TUI) {
 }
 
 # Export manifest(s)
-Export-SrmManifest `
+Write-Host "`nExporting manifest(s)..." -ForegroundColor Cyan
+
+$finalDestination = if ($OutputMode -in @('Merged', 'SingleFile')) {
+    if (![string]::IsNullOrWhiteSpace($OutputFile)) {
+        if ([System.IO.Path]::IsPathRooted($OutputFile)) { $OutputFile } else { Join-Path $OutputPath $OutputFile }
+    } else {
+        $defaultFileName = Get-SrmDefaultManifestFileName -Path $resolvedInputPaths[0]
+        Join-Path $OutputPath $defaultFileName
+    }
+} else {
+    $OutputPath
+}
+
+$written = Export-SrmManifest `
     -Manifests $manifests `
-    -Path $outFilePath `
+    -Path $finalDestination `
     -OutputMode $OutputMode `
     -Append:$Append `
-    -Force:$Force
+    -Force:$Force `
+    -PassThru:$true
 
-if (-not $EditMode) {
-    Write-Host "Done! Processed $($files.Count) shortcut(s)."
-}
-else {
-    Write-Host "Done! Processed $($manifests.Count) manifest entries."
+Write-Host "Done! Processed $($manifests.Count) shortcut(s)." -ForegroundColor Green
+if ($written -and $written.Count -gt 0) {
+    Write-Host "Generated file(s):" -ForegroundColor Green
+    foreach ($w in $written) {
+        Write-Host "  -> $w" -ForegroundColor White
+    }
 }
