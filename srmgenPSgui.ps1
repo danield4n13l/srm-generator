@@ -432,19 +432,21 @@ class SrmManifestItem {
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <Button Name="btnAddRow" Grid.Column="0" Content="+ Add Game" Margin="0,0,6,0"/>
-                    <Button Name="btnRemoveRow" Grid.Column="1" Content="- Remove Selected" Margin="0,0,6,0"/>
-                    <Button Name="btnClearAll" Grid.Column="2" Content="Clear Table" Margin="0,0,10,0"/>
-                    <TextBlock Name="lblItemCount" Grid.Column="3" Text="0 game(s) loaded" VerticalAlignment="Center" Foreground="{DynamicResource FgMuted}" FontWeight="SemiBold"/>
+                    <Button Name="btnAddManualShortcut" Grid.Column="0" Content="➕ Add Shortcut (.lnk / .exe)..." Background="{DynamicResource BtnPrimaryBg}" Foreground="{DynamicResource BtnPrimaryFg}" BorderBrush="{DynamicResource BorderBrush}" FontWeight="SemiBold" Margin="0,0,8,0" Padding="12,5"/>
+                    <Button Name="btnAddRow" Grid.Column="1" Content="+ Blank Row" Margin="0,0,6,0"/>
+                    <Button Name="btnRemoveRow" Grid.Column="2" Content="- Remove Selected" Margin="0,0,6,0"/>
+                    <Button Name="btnClearAll" Grid.Column="3" Content="Clear Table" Margin="0,0,10,0"/>
+                    <TextBlock Name="lblItemCount" Grid.Column="4" Text="0 game(s) loaded" VerticalAlignment="Center" Foreground="{DynamicResource FgMuted}" FontWeight="SemiBold"/>
 
-                    <Button Name="btnScan" Grid.Column="5" Content="⚡ Scan Shortcuts" Background="{DynamicResource BtnPrimaryBg}" Foreground="{DynamicResource BtnPrimaryFg}" BorderBrush="{DynamicResource BorderBrush}" FontWeight="SemiBold" Margin="0,0,8,0" Padding="14,5"/>
-                    <Button Name="btnWhatIf" Grid.Column="6" Content="🔍 Simulate (WhatIf)" Margin="0,0,8,0" Padding="10,5"/>
-                    <Button Name="btnExport" Grid.Column="7" Content="💾 Export Manifest(s)" Background="{DynamicResource BtnSuccessBg}" Foreground="{DynamicResource BtnSuccessFg}" BorderBrush="{DynamicResource BorderBrush}" FontWeight="SemiBold" Padding="16,5"/>
+                    <Button Name="btnScan" Grid.Column="6" Content="⚡ Scan Folders" Background="{DynamicResource BtnPrimaryBg}" Foreground="{DynamicResource BtnPrimaryFg}" BorderBrush="{DynamicResource BorderBrush}" FontWeight="SemiBold" Margin="0,0,8,0" Padding="14,5"/>
+                    <Button Name="btnWhatIf" Grid.Column="7" Content="🔍 Simulate (WhatIf)" Margin="0,0,8,0" Padding="10,5"/>
+                    <Button Name="btnExport" Grid.Column="8" Content="💾 Export Manifest(s)" Background="{DynamicResource BtnSuccessBg}" Foreground="{DynamicResource BtnSuccessFg}" BorderBrush="{DynamicResource BorderBrush}" FontWeight="SemiBold" Padding="16,5"/>
                 </Grid>
 
                 <!-- DataGrid -->
@@ -585,6 +587,7 @@ $chkAppend              = $window.FindName("chkAppend")
 $chkForce               = $window.FindName("chkForce")
 $btnLoadJson            = $window.FindName("btnLoadJson")
 $btnSaveCustomTemplate  = $window.FindName("btnSaveCustomTemplate")
+$btnAddManualShortcut   = $window.FindName("btnAddManualShortcut")
 $btnAddRow              = $window.FindName("btnAddRow")
 $btnRemoveRow           = $window.FindName("btnRemoveRow")
 $btnClearAll            = $window.FindName("btnClearAll")
@@ -935,6 +938,72 @@ $btnLoadJson.Add_Click({
         Update-ItemCount
         Write-GuiLog "SUCCESS" "Imported $($entries.Count) entry/entries from $jsonFile"
         Update-Status "Loaded $($entries.Count) entries from $jsonFile."
+    }
+})
+
+# Manually Add Shortcut (.lnk or .exe)
+$btnAddManualShortcut.Add_Click({
+    $dialog = [System.Windows.Forms.OpenFileDialog]::new()
+    $dialog.Title = "Select Shortcut (.lnk) or Executable (.exe)"
+    $dialog.Filter = "Shortcuts & Executables (*.lnk;*.exe)|*.lnk;*.exe|Windows Shortcuts (*.lnk)|*.lnk|Application Executables (*.exe)|*.exe|All Files (*.*)|*.*"
+    $dialog.Multiselect = $true
+
+    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $destFolder = $null
+        if ($lstFolders.SelectedItem -and (Test-Path $lstFolders.SelectedItem)) {
+            $destFolder = [string]$lstFolders.SelectedItem
+        } elseif ($lstFolders.Items.Count -gt 0 -and (Test-Path $lstFolders.Items[0])) {
+            $destFolder = [string]$lstFolders.Items[0]
+        } elseif (![string]::IsNullOrWhiteSpace($txtOutputPath.Text) -and (Test-Path $txtOutputPath.Text)) {
+            $destFolder = $txtOutputPath.Text
+        }
+
+        $templateName = if ($cmbTemplate.SelectedIndex -eq 1) { 'artwork' } elseif ($script:customTemplatePath) { $script:customTemplatePath } else { 'default' }
+        $templateObj = Get-SrmTemplate -Template $templateName
+
+        $addedCount = 0
+        foreach ($selectedFile in $dialog.FileNames) {
+            try {
+                $ext = [System.IO.Path]::GetExtension($selectedFile)
+                $targetDest = if ($destFolder) { $destFolder } else { [System.IO.Path]::GetDirectoryName($selectedFile) }
+
+                $entry = Add-SrmManualShortcut `
+                    -FilePath $selectedFile `
+                    -DestinationFolder $targetDest `
+                    -Database $script:database `
+                    -Template $templateObj
+
+                if ($null -ne $entry) {
+                    $fol = if ($entry.Contains('_SourceDirectory') -and !([string]::IsNullOrWhiteSpace($entry['_SourceDirectory']))) { Split-Path $entry['_SourceDirectory'] -Leaf } else { "Manual" }
+                    $cov = if ($entry.Contains('cover')) { [string]$entry['cover'] } else { "" }
+                    $hash = if ($entry.Contains('_ItemHash')) { [string]$entry['_ItemHash'] } else { "" }
+                    $srcDir = if ($entry.Contains('_SourceDirectory')) { [string]$entry['_SourceDirectory'] } else { $targetDest }
+                    $aa = if ($entry.Contains('appendArgsToExecutable')) { [bool]$entry['appendArgsToExecutable'] } else { $false }
+
+                    $item = [SrmManifestItem]::new($fol, [string]$entry['title'], [string]$entry['target'], [string]$entry['startIn'], [string]$entry['launchOptions'], $aa, $cov, $hash, $srcDir)
+                    $itemsCollection.Add($item)
+                    $addedCount++
+
+                    if ($ext -ieq '.exe') {
+                        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($selectedFile)
+                        Write-GuiLog "MANUAL" "Created shortcut '$baseName - Shortcut.lnk' in '$targetDest' and scanned entry into table."
+                    } else {
+                        Write-GuiLog "MANUAL" "Parsed existing shortcut '$([System.IO.Path]::GetFileName($selectedFile))' and scanned entry into table."
+                    }
+                }
+            } catch {
+                Write-GuiLog "ERROR" "Failed to process manual file '$selectedFile': $_"
+            }
+        }
+
+        if ($addedCount -gt 0) {
+            Save-SrmDatabase -Database $script:database
+            Update-ItemCount
+            Update-Status "Manually added $addedCount shortcut(s) to the table."
+            if ($itemsCollection.Count -gt 0) {
+                $gridEntries.ScrollIntoView($itemsCollection[$itemsCollection.Count - 1])
+            }
+        }
     }
 })
 

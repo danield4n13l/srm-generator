@@ -381,6 +381,157 @@ function ConvertFrom-LnkShortcut {
     }
 }
 
+function New-SrmShortcut {
+    <#
+    .SYNOPSIS
+    Creates a Windows .lnk shortcut for an executable file named '<executable baseName> - Shortcut.lnk'.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]$ExecutablePath,
+
+        [Parameter(Mandatory = $false, Position = 1)]
+        [string]$DestinationFolder,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Arguments = '',
+
+        [Parameter(Mandatory = $false)]
+        [string]$WorkingDirectory = '',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Force
+    )
+
+    if (!(Test-Path $ExecutablePath -PathType Leaf)) {
+        Write-Error "Executable file not found: $ExecutablePath"
+        return $null
+    }
+
+    $exeItem = Get-Item $ExecutablePath
+    $baseName = $exeItem.BaseName
+    $shortcutFileName = "$baseName - Shortcut.lnk"
+
+    $destDir = if (![string]::IsNullOrWhiteSpace($DestinationFolder)) {
+        $DestinationFolder
+    } else {
+        $exeItem.DirectoryName
+    }
+
+    if (!(Test-Path $destDir)) {
+        if ($PSCmdlet.ShouldProcess($destDir, "Create shortcut destination directory")) {
+            New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+        }
+    }
+
+    $shortcutFullPath = Join-Path $destDir $shortcutFileName
+    $workDir = if (![string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+        $WorkingDirectory
+    } else {
+        $exeItem.DirectoryName
+    }
+
+    if ($PSCmdlet.ShouldProcess($shortcutFullPath, "Create shortcut for $($exeItem.Name)")) {
+        $wsh = New-Object -ComObject WScript.Shell
+        try {
+            $shortcut = $wsh.CreateShortcut($shortcutFullPath)
+            $shortcut.TargetPath = $exeItem.FullName
+            $shortcut.WorkingDirectory = $workDir
+            if (![string]::IsNullOrWhiteSpace($Arguments)) {
+                $shortcut.Arguments = $Arguments
+            }
+            $shortcut.Save()
+        }
+        finally {
+            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($wsh) | Out-Null
+        }
+    }
+
+    return $shortcutFullPath
+}
+
+function Add-SrmManualShortcut {
+    <#
+    .SYNOPSIS
+    Manually parses an existing .lnk shortcut OR creates a .lnk shortcut for an .exe file (named '<baseName> - Shortcut.lnk') and scans it into a manifest entry.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $false, Position = 1)]
+        [string]$DestinationFolder,
+
+        [Parameter(Mandatory = $false)]
+        [object]$Database,
+
+        [Parameter(Mandatory = $false)]
+        [object]$Template
+    )
+
+    if (!(Test-Path $FilePath -PathType Leaf)) {
+        Write-Error "File not found: $FilePath"
+        return $null
+    }
+
+    $fileItem = Get-Item $FilePath
+    $lnkPath = $null
+
+    if ($fileItem.Extension -ieq '.lnk') {
+        $lnkPath = $fileItem.FullName
+    }
+    elseif ($fileItem.Extension -ieq '.exe') {
+        $dest = if (![string]::IsNullOrWhiteSpace($DestinationFolder)) { $DestinationFolder } else { $fileItem.DirectoryName }
+        $lnkPath = New-SrmShortcut -ExecutablePath $fileItem.FullName -DestinationFolder $dest
+        if ($null -eq $lnkPath -or !(Test-Path $lnkPath)) {
+            Write-Error "Failed to create shortcut for: $FilePath"
+            return $null
+        }
+    }
+    else {
+        Write-Error "Unsupported file type: $($fileItem.Extension). File must be .lnk or .exe."
+        return $null
+    }
+
+    $shortcutInfo = ConvertFrom-LnkShortcut -Path $lnkPath
+    if ($null -eq $shortcutInfo) {
+        Write-Error "Failed to parse shortcut: $lnkPath"
+        return $null
+    }
+
+    $hash = Get-SrmItemHash -Target $shortcutInfo.Target -StartIn $shortcutInfo.StartIn
+    $lnkItem = Get-Item $lnkPath
+
+    if ($null -ne $Database -and $null -ne $Database.Shortcuts) {
+        $Database.Shortcuts[$lnkPath] = [pscustomobject]@{
+            shortcutPath           = $lnkPath
+            fileLastWriteTimeUtc   = $lnkItem.LastWriteTimeUtc.ToString("o")
+            fileLength             = $lnkItem.Length
+            title                  = $shortcutInfo.Title
+            target                 = $shortcutInfo.Target
+            startIn                = $shortcutInfo.StartIn
+            launchOptions          = $shortcutInfo.LaunchOptions
+            appendArgsToExecutable = $false
+            itemHash               = $hash
+            scannedAt              = (Get-Date).ToString("o")
+        }
+    }
+
+    $entry = New-SrmManifestEntry `
+        -Title $shortcutInfo.Title `
+        -Target $shortcutInfo.Target `
+        -StartIn $shortcutInfo.StartIn `
+        -LaunchOptions $shortcutInfo.LaunchOptions `
+        -AppendArgsToExecutable $false `
+        -Template $Template `
+        -SourceDirectory $lnkItem.DirectoryName `
+        -ItemHash $hash
+
+    return $entry
+}
+
 function New-SrmManifestEntry {
     <#
     .SYNOPSIS
@@ -1245,6 +1396,8 @@ Export-ModuleMember -Function @(
     'Save-SrmSettings',
     'Get-SrmTemplate',
     'ConvertFrom-LnkShortcut',
+    'New-SrmShortcut',
+    'Add-SrmManualShortcut',
     'New-SrmManifestEntry',
     'Invoke-SrmParallelScan',
     'Import-SrmManifest',

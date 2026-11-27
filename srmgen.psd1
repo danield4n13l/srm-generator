@@ -21,6 +21,8 @@
         'Save-SrmSettings',
         'Get-SrmTemplate',
         'ConvertFrom-LnkShortcut',
+        'New-SrmShortcut',
+        'Add-SrmManualShortcut',
         'New-SrmManifestEntry',
         'Invoke-SrmParallelScan',
         'Import-SrmManifest',

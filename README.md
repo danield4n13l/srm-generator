@@ -26,6 +26,7 @@ A high-performance, multi-threaded PowerShell tool and module that parses Window
 - **Desktop GUI (`srmgenPSgui.ps1`)**:
   - Native Windows WPF interface with adaptive **Auto (System) / Dark / Light** themes.
   - Multi-folder list manager (Add, Remove, Clear, Recent Folders).
+  - **Manual Shortcut & Executable Import**: Add existing `.lnk` files directly OR select `.exe` binaries to automatically generate `<baseName> - Shortcut.lnk`, hash, and scan them into the manifest.
   - Two-way editable `DataGrid` preview table with column headers, in-cell edit protection, and "+ Add Game" / "- Remove" controls.
   - Live progress bar tracking parallel parsing percentage.
   - Integrated **Console & Error Activity Log** with copy and clear controls.
@@ -51,7 +52,7 @@ srm-generator/
 │   ├── default.template.json
 │   └── artwork.template.json
 ├── tests/
-│   └── Test-SrmGen.ps1     # Automated test suite (49 tests)
+│   └── Test-SrmGen.ps1     # Automated test suite (60 tests)
 └── TEST/                   # Sample .lnk shortcuts and test manifests
 ```
 
@@ -178,7 +179,7 @@ When shortcuts are parsed, `srm-generator` creates or updates a local database (
 
 ## Running Automated Tests
 
-Run the full automated test suite (49 unit and integration tests):
+Run the full automated test suite (60 unit and integration tests):
 
 ```powershell
 powershell -File .\tests\Test-SrmGen.ps1

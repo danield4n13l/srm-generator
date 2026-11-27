@@ -30,7 +30,8 @@
 - [x] Incremental scan mode (`-SkipUnmodified` / GUI checkbox) to skip already scanned, unmodified shortcuts.
 - [x] Persistent application settings and folder history (`.srm_settings.json`).
 - [x] Multi-threaded parallel shortcut parsing via worker thread pool (`-Threads`).
+- [x] Manually add shortcut feature (`New-SrmShortcut` and `Add-SrmManualShortcut`) supporting `.lnk` files and `.exe` files (generating `<baseName> - Shortcut.lnk`).
 - [x] Live progress bar tracking parallel parsing percentage in CLI and GUI.
 - [x] Comprehensive console and error activity log in the GUI with copy/clear controls.
-- [x] Expanded automated test suite with 49 unit and integration tests.
+- [x] Expanded automated test suite with 60 unit and integration tests.
 

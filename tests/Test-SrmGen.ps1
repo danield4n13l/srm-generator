@@ -259,6 +259,55 @@ Write-Host "`n13. Pipeline processing" -ForegroundColor White
 $piped = Get-ChildItem (Join-Path $scriptDir "TEST") -Filter "*.lnk" | ConvertFrom-LnkShortcut
 Assert-Equal "Pipeline parsed 3 shortcuts" $piped.Count 3
 
+# 14. New-SrmShortcut (Creating .lnk from .exe)
+Write-Host "`n14. New-SrmShortcut (<baseName> - Shortcut.lnk creation)" -ForegroundColor White
+$tempExeDir = Join-Path $env:TEMP "srm_manual_test_$([System.Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $tempExeDir -Force | Out-Null
+$dummyExePath = Join-Path $tempExeDir "RetroGame.exe"
+Set-Content -Path $dummyExePath -Value "dummy binary content"
+
+try {
+    $createdLnk = New-SrmShortcut -ExecutablePath $dummyExePath -DestinationFolder $tempExeDir
+    Assert-True "Shortcut created on disk" (Test-Path $createdLnk)
+    Assert-True "Filename matches '<baseName> - Shortcut.lnk'" ($createdLnk -like "*RetroGame - Shortcut.lnk")
+
+    $parsed = ConvertFrom-LnkShortcut -Path $createdLnk
+    Assert-Equal "Parsed title matches baseName" $parsed.Title "RetroGame"
+    Assert-Equal "Parsed target matches exe path" $parsed.Target $dummyExePath
+    Assert-Equal "Parsed startIn matches directory" $parsed.StartIn $tempExeDir
+}
+finally {
+    Remove-Item -Recurse -Force $tempExeDir -ErrorAction SilentlyContinue
+}
+
+# 15. Add-SrmManualShortcut (.exe and .lnk handling)
+Write-Host "`n15. Add-SrmManualShortcut (Manual addition of .exe and .lnk)" -ForegroundColor White
+$tempManualDir = Join-Path $env:TEMP "srm_man_test2_$([System.Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $tempManualDir -Force | Out-Null
+$manualExePath = Join-Path $tempManualDir "ModernGame.exe"
+Set-Content -Path $manualExePath -Value "binary"
+$testDb = Get-SrmDatabase
+
+try {
+    # Test adding an .exe file (should generate '<baseName> - Shortcut.lnk' and scan it)
+    $exeEntry = Add-SrmManualShortcut -FilePath $manualExePath -DestinationFolder $tempManualDir -Database $testDb
+    $expectedLnk = Join-Path $tempManualDir "ModernGame - Shortcut.lnk"
+
+    Assert-True "Shortcut created automatically from .exe" (Test-Path $expectedLnk)
+    Assert-Equal "Manifest entry title matches" $exeEntry.title "ModernGame"
+    Assert-Equal "Manifest entry target matches" $exeEntry.target $manualExePath
+    Assert-True "Database contains newly created shortcut" ($testDb.Shortcuts.ContainsKey($expectedLnk))
+
+    # Test adding an existing .lnk file
+    $animalLnk = Join-Path $scriptDir "TEST\Animal Well.exe - Shortcut.lnk"
+    $lnkEntry = Add-SrmManualShortcut -FilePath $animalLnk -DestinationFolder $tempManualDir -Database $testDb
+    Assert-Equal "Manifest entry from .lnk has title" $lnkEntry.title "Animal Well"
+    Assert-True "Database contains existing shortcut" ($testDb.Shortcuts.ContainsKey((Resolve-Path $animalLnk).Path))
+}
+finally {
+    Remove-Item -Recurse -Force $tempManualDir -ErrorAction SilentlyContinue
+}
+
 Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host " Results: $passed Passed, $failed Failed" -ForegroundColor $(if ($failed -eq 0) { "Green" } else { "Red" })
 Write-Host "========================================" -ForegroundColor Cyan
